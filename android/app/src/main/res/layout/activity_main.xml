@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/main"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp"
+    tools:context=".MainActivity">
+
+    <!-- Кнопка настроек в углу -->
+    <ImageButton
+        android:id="@+id/settingsIcon"
+        android:layout_width="48dp"
+        android:layout_height="30dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/settings_icon_description"
+        android:src="@drawable/ic_settings"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Поле лога (верхняя половина) -->
+    <TextView
+        android:id="@+id/logTextView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:background="#F5F5F5"
+        android:gravity="start|top"
+        android:padding="8dp"
+        android:scrollbars="vertical"
+        android:textSize="16sp"
+        android:typeface="monospace"
+        app:layout_constraintBottom_toTopOf="@+id/inputEditText"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_bias="0.0"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/settingsIcon"
+        app:layout_constraintVertical_weight="1" />
+
+    <!-- Поле ввода (нижняя половина) -->
+    <EditText
+        android:id="@+id/inputEditText"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:gravity="start|top"
+        android:inputType="textMultiLine"
+        android:padding="8dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_bias="0.0"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/logTextView"
+        app:layout_constraintVertical_weight="1.2" />
+</androidx.constraintlayout.widget.ConstraintLayout>
