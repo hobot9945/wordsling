@@ -1,6 +1,7 @@
 package com.example.wordsling
 
 import android.text.Editable
+import android.util.Log
 import android.view.inputmethod.BaseInputConnection
 
 /**
@@ -42,6 +43,10 @@ class TextProcessor {
     // Позиция начала композита на прошлой итерации
     private var _refSpanStartInd = -1
 
+    // Маркеры стабилизации: перед и после дельты
+    private var _prefStableMarker = ""
+    private var _suffStableMarker = ""
+
     /** Признак того, что в текущем состоянии текста активна композиция IME. */
     var compositionFlag = false
 
@@ -70,22 +75,10 @@ class TextProcessor {
      * - обновляет `compositionFlag`;
      * - обновляет `delta`.
      */
-    // todo Иногда, gboard забывает отменить композицию. Строка остается нестабильной, хотя, после
-    // секундной задежки уже ясно, что она никогда не будет изменена. Внутри MainActivity нужно
-    // установить таймер молчания. Если по истечении срока текстовый процессор все еще находится
-    // в состоянии композиции (поднят флаг композиции), нужно побудить его записать в поток
-    // звездочку.
     fun takeText(s: Editable): TextProcessor {
 
         // Индекс начала композитной части. Если она есть, индекс >= 0.
         val spanStartInd = BaseInputConnection.getComposingSpanStart(s)
-
-        // Если позиция композиции изменилась, то предыдущий текст считается стабилизированным
-        var stabilizationMark = ""
-        if (spanStartInd != _refSpanStartInd) {
-            stabilizationMark = "*"
-            _refSpanStartInd = spanStartInd
-        } // if
 
         // Если есть участок композиции, поднимаем флаг
         compositionFlag = spanStartInd >= 0
@@ -94,6 +87,7 @@ class TextProcessor {
         // Если идет композиция, изменяется только часть от начала спана.
         // Иначе сравниваем строки целиком (индекс = 0), что корректно отрабатывает и удаления.
         val mutableInd = if (compositionFlag) spanStartInd.coerceIn(0, s.length) else 0
+Log.d("TextProcessor", "spanStartInd: $spanStartInd, mutableInd: $mutableInd, s: $s")
 
         // Новый вариант изменяемой части.
         val newString = s.toString().substring(mutableInd)
@@ -104,7 +98,15 @@ class TextProcessor {
             if (mutableInd > _referenceText.length) "" else _referenceText.substring(mutableInd)
 
         // Новая дельта. Если прошлый текст стабилизирован, ставим префикс `*` без разделяющих пробелов
-        delta = stabilizationMark + _extractDelta(newString, refString)
+        delta = _extractDelta(newString, refString)
+
+        // Установить маркеры стабилизации
+        _setStabilizationMarkers(spanStartInd, delta.isEmpty())
+        delta = "$_prefStableMarker$delta$_suffStableMarker"
+
+        _refSpanStartInd = spanStartInd
+
+Log.d("TextProcessor", "delta: $delta, newString: $newString, refString: $refString")
 
         // Обновляем опорный текст для следующей итерации
         _referenceText = s.toString()
@@ -150,6 +152,51 @@ class TextProcessor {
             } // if
         } // buildString
     } // extractDelta()
+
+    /**
+     * Вычисляет и устанавливает маркеры стабилизации текста для протокола wordsling.
+     *
+     * Маркеры сигнализируют серверу о статусе текста:
+     * - `_prefStableMarker` ("*"): весь предшествующий текст стабилизирован.
+     * - `_suffStableMarker` ("*"): весь текст, включая текущую дельту, стабилизирован.
+     *
+     * Правила установки (маркеры исключают друг друга):
+     * - Спан исчез (curr == -1) и был до этого (prev >= 0):
+     *   - Если дельта пустая, ставится префикс (зафиксирован старый текст).
+     *   - Если дельта не пустая, ставится суффикс (зафиксирован старый текст + новая дельта).
+     * - Спан сместился (curr != prev), но не исчез, и был до этого (prev >= 0):
+     *   Ставится префикс (старая композиция зафиксирована, началась новая).
+     * - Спана нет и не было (curr == -1, prev == -1), но есть дельта:
+     *   Ставится суффикс (вводится стабильный текст вне композиции, например при вставке).
+     * - Во всех остальных случаях (в т.ч. активная неизменная композиция) маркеры сбрасываются.
+     *
+     * @param spanStartInd индекс начала текущего спана (-1, если спана нет).
+     * @param isDeltaEmpty признак отсутствия текстовых изменений в текущей итерации.
+     */
+    private fun _setStabilizationMarkers(spanStartInd: Int, isDeltaEmpty: Boolean) {
+        _prefStableMarker = ""
+        _suffStableMarker = ""
+
+        val curr = spanStartInd
+        val prev = _refSpanStartInd
+
+        if (curr == -1 && prev >= 0) {
+            // Спан исчез. Весь текст стабилизирован.
+            if (isDeltaEmpty) {
+                // Текст не изменился, просто зафиксирован.
+                _prefStableMarker = "*"
+            } else {
+                // Текст изменился и сразу зафиксирован.
+                _suffStableMarker = "*"
+            } // if
+        } else if (curr != prev && prev >= 0) {
+            // Спан сместился, но не исчез. Предшествующий текст стабилизирован, новая часть — нет.
+            _prefStableMarker = "*"
+        } else if (curr == -1 && prev == -1 && !isDeltaEmpty) {
+            // Спана нет и не было, но текст вводится. Считаем ввод стабильным.
+            _suffStableMarker = "*"
+        } // if
+    } // _setStabilizationMarkers()
 
     /**
      * Преобразует строку в нижний регистр и заменяет знаки пунктуации
