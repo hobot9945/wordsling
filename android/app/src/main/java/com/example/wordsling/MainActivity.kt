@@ -7,6 +7,7 @@ import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.method.ScrollingMovementMethod
+import android.view.WindowManager
 import android.view.inputmethod.BaseInputConnection
 import android.widget.EditText
 import android.widget.TextView
@@ -55,6 +56,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Отключаем засыпание экрана во время работы приложения
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // Инициализируем объекты в нужном порядке
         binding = ActivityMainBinding.inflate(layoutInflater)
