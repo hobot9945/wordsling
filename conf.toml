@@ -1,0 +1,3 @@
+port = "51234"
+microphone_hotkey = "<left_alt>"
+language_hotkey = "<left_alt>+<left_win>"

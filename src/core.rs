@@ -1,37 +1,44 @@
-//! Центральная часть приложения
+//! Core application module.
 //!
-//! Отвечает за оркестрацию работы приложения: приём, переработку и отправку распознанного
-//! текста в поля ввода пользовательского интерфейса. Для работы создает собственную нить, поскольку
-//! основная нить используется UI.
+//! Responsible for orchestrating the application's workflow: receiving, processing,
+//! and sending recognized text to user interface input fields. Spawns its own thread
+//! for operation, as the main thread is reserved for the UI.
 //!
-//! При инициализации создает все нужные для работы структуры. Те, если надо, запускают свои нити и
-//! корутины.
+//! During initialization, it creates all necessary working structures. These structures,
+//! in turn, spawn their own threads and coroutines if needed.
 
 use std::thread;
+use hobolib::{eprntln, prntln};
 
 pub struct Core {
-    // Хандл нити. Используется при закрытии, чтобы выполнить join() из основной нити.
+    // Thread handle. Used during shutdown to perform join() from the main thread.
     handle: Option<thread::JoinHandle<()>>
 }
 
 impl Core {
 
-    /// Конструктор
+    /// Constructor.
     pub fn new() -> Self {
 
-        // Создать себя.
+        // Initialize and return the instance.
         Core {
             // handle: Some(handle)
             handle: None
         }
-    }   // fn new()
+    }   // new()
 }   // impl Core
 
 impl Drop for Core {
 
-    /// Деструктор
+    /// Destructor.
+    /// Waits for the core thread to finish and checks for panics.
     fn drop(&mut self) {
-        let _ = self.handle.take();
-        println!("дропнута нить ядра");
+
+        if let Err(panic_payload) = self.handle.take().unwrap().join() {
+            // Thread panicked, log the error.
+            eprntln!("Core thread panicked: {:?}", panic_payload);
+        }   // if
+
+        prntln!("Core thread dropped");
     }
-}
+}   // impl Drop for Core
