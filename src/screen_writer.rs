@@ -4,13 +4,13 @@
 //! on the host OS.
 //!
 //! # RESPONSIBILITY
-//! - Receive prepared write commands from the text processor.
-//! - Execute them mechanically via clipboard paste and keyboard emulation.
-//! - Contain no protocol parsing or text interpretation logic.
+//! - Receive prepared screen transfer commands.
+//! - Accumulate text in a local buffer and debounce clipboard paste operations (`Ctrl+V`).
+//! - Handle backspaces by shrinking the buffer or emitting real keystrokes if the buffer is empty.
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use hobolib::clipboard::set_clipboard_text;
 use hobolib::eprntln;
 use hobolib::keyboard::{send_backspace, send_ctrl_v};
@@ -18,19 +18,11 @@ use crate::screen_transfer::ScreenTransfer;
 
 pub struct ScreenWriter {
     _handle: Option<thread::JoinHandle<()>>,
-}   // ScreenWriter
+}
 
 impl ScreenWriter {
-
     /// Constructor.
-    ///
-    /// Spawns a worker thread that reads prepared write commands from `write_cmd_rx`
-    /// and forwards them to the currently focused window.
-    ///
-    /// # Parameters
-    /// - `write_cmd_rx`: receiver end of the channel from the text processor.
     pub fn new(write_cmd_rx: Receiver<ScreenTransfer>) -> Self {
-
         let handle = thread::spawn(move || {
             _screen_writer_loop(write_cmd_rx);
         });
@@ -38,77 +30,180 @@ impl ScreenWriter {
         ScreenWriter {
             _handle: Some(handle),
         }
-    }   // new()
-
-}   // impl ScreenWriter
+    }
+}
 
 impl Drop for ScreenWriter {
-
-    /// Destructor.
-    /// Waits for the worker thread to finish.
     fn drop(&mut self) {
-
         if let Some(handle) = self._handle.take() {
             if let Err(panic_payload) = handle.join() {
                 eprntln!("ScreenWriter thread panicked: {:?}", panic_payload);
-            }   // if
-        }   // if
-
+            }
+        }
         hobolib::prntln!("ScreenWriter thread dropped");
-    }   // drop()
+    }
+}
 
-}   // impl Drop for ScreenWriter
-
+/// Worker loop of the screen writer.
+///
+/// Drives the `PasteBuffer` state machine using events from the channel.
 fn _screen_writer_loop(write_cmd_rx: Receiver<ScreenTransfer>) {
 
-    for transfer in write_cmd_rx {
+    // Cooldown interval for clipboard pasting.
+    let mut buffer = _PasteBuffer::new(Duration::from_millis(80));
+    let mut timeout = None;
 
-        let result = match &transfer {
-            ScreenTransfer::Text(text) => send_to_screen(None, text),
-            ScreenTransfer::Backspace(count) => send_to_screen(Some(*count), ""),
-        };  // match
+    loop {
+        // Wait for an event or timeout.
+        let recv_result = match timeout {
+            Some(duration) => write_cmd_rx.recv_timeout(duration),
+            None => write_cmd_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
 
-        if let Err(error_text) = result {
-            eprntln!("ScreenWriter failed to send output to screen: {}", error_text);
-        }   // if
-    }   // for
+        // Dispatch the event to the buffer.
+        timeout = match recv_result {
+            Ok(ScreenTransfer::Text(text)) => {
+                buffer.push_text(&text)
+            }
+            Ok(ScreenTransfer::Backspace(count)) => {
+                buffer.apply_backspaces(count)
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                buffer.flush()
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = buffer.flush();
+                break;
+            }
+        };
+    }
+}
 
-}   // _screen_writer_loop()
+// -----------------------------------------------------------------------------
+// PasteBuffer
+// -----------------------------------------------------------------------------
 
-/// Description: Outputs backspaces and/or text to the active window.
-///
-/// # Execution order
-/// 1. Emits the specified number of backspaces (if any) to remove old text.
-/// 2. Pastes the provided text chunk (if it is not empty).
-///
-/// # Parameters
-/// - `backspaces`: Optional number of backspaces to send.
-/// - `chunk`: The text to be pasted.
-///
-/// # Errors
-/// Returns `Err(String)` if clipboard access or keyboard emulation fails.
-pub fn send_to_screen(backspaces: Option<usize>, chunk: &str) -> Result<(), String> {
+/// Manages accumulation of text and backspace commands,
+/// executing OS operations with debounce intervals.
+struct _PasteBuffer {
+    text_buf: String,
+    last_paste: Instant,
+    cooldown: Duration,
+}
 
-    /// Delay after a paste operation to let the target application process the input.
-    const BACKSPACE_DELAY_MS: u64 = 20;
-    const PASTE_DELAY_MS: u64 = 20;
+impl _PasteBuffer {
 
+    fn new(cooldown: Duration) -> Self {
+        _PasteBuffer {
+            text_buf: String::new(),
+            // Initialize in the past so the first paste can happen immediately.
+            last_paste: Instant::now() - cooldown,
+            cooldown,
+        }
+    }
 
-    // First, process backspaces to remove any trailing text that was corrected.
-    if let Some(count) = backspaces {
+    /// Calculates how much time is left before a paste is allowed.
+    fn _time_to_next_paste(&self) -> Duration {
+        let elapsed = self.last_paste.elapsed();
+        if elapsed >= self.cooldown {
+            Duration::ZERO
+        } else {
+            self.cooldown - elapsed
+        }
+    }
+
+    /// Calculates the required timeout for the main loop.
+    /// If the buffer is empty, returns `None` (wait indefinitely).
+    fn _current_timeout(&self) -> Option<Duration> {
+        if self.text_buf.is_empty() {
+            None
+        } else {
+            Some(self._time_to_next_paste())
+        }
+    }
+
+    /// Adds text to the buffer. Updates clipboard immediately.
+    /// Returns the timeout until the buffer should be flushed.
+    fn push_text(&mut self, new_text: &str) -> Option<Duration> {
+        self.text_buf.push_str(new_text);
+
+        // Updating the clipboard is cheap, do it immediately so it's ready.
+        if let Err(e) = set_clipboard_text(&self.text_buf) {
+            eprntln!("ScreenWriter: clipboard update failed: {}", e);
+        }
+
+        // If cooldown has already passed, we could theoretically flush right now.
+        // However, waiting for the timeout allows rapid consecutive chunks to be coalesced.
+        // The loop will immediately get a 0ms timeout and call flush() on the next iteration
+        // if no more text is pending in the channel.
+        self._current_timeout()
+    }
+
+    /// Applies backspaces.
+    /// Shrinks the buffer first. If more backspaces are needed, flushes the remaining
+    /// buffer and sends real keystrokes.
+    fn apply_backspaces(&mut self, mut count: usize) -> Option<Duration> {
+
+        // 1. Eat from the buffer first (no OS delay needed).
+        let buf_len = self.text_buf.chars().count();
+        if count <= buf_len {
+            // Simply truncate the buffer.
+            let keep_chars = buf_len - count;
+            self.text_buf = self.text_buf.chars().take(keep_chars).collect();
+
+            // Update clipboard to reflect truncation.
+            if !self.text_buf.is_empty() {
+                let _ = set_clipboard_text(&self.text_buf);
+            }
+            return self._current_timeout();
+        }
+
+        // Buffer completely eaten, but we still need more backspaces.
+        count -= buf_len;
+        self.text_buf.clear();
+
+        // We don't need to flush the text buffer because it's empty now.
+        // But we DO need to wait out the cooldown before sending real backspace keys!
+        // Why? Because the target app might still be processing a previous `Ctrl+V`.
+        // If we send Backspace too early, it might delete characters *before* the paste happens.
+        let delay = self._time_to_next_paste();
+        if delay > Duration::ZERO {
+            thread::sleep(delay);
+        }
+
+        // 2. Send real backspaces to OS.
         for _ in 0..count {
-            send_backspace()?;
-            thread::sleep(Duration::from_millis(BACKSPACE_DELAY_MS));
-        }   // for
-    }   // if
+            if let Err(e) = send_backspace() {
+                eprntln!("ScreenWriter: send_backspace failed: {}", e);
+                break;
+            }
+            // Small delay between physical keys for target app to process.
+            thread::sleep(Duration::from_millis(10));
+        }
 
-    // Second, output the new text chunk.
-    if !chunk.is_empty() {
-        set_clipboard_text(chunk)?;
-        send_ctrl_v()?;
-        // Allow the target application to process the paste before the next operation.
-        thread::sleep(Duration::from_millis(PASTE_DELAY_MS));
-    }   // if
+        // We just interacted with the OS. Reset the cooldown timer.
+        self.last_paste = Instant::now();
+        None
+    }
 
-    Ok(())
-}   // send_to_screen()
+    /// Flushes accumulated text to the OS via clipboard paste.
+    fn flush(&mut self) -> Option<Duration> {
+        if self.text_buf.is_empty() {
+            return None;
+        }
+
+        // Safety check: wait out remaining cooldown if called prematurely.
+        let delay = self._time_to_next_paste();
+        if delay > Duration::ZERO {
+            thread::sleep(delay);
+        }
+
+        if let Err(e) = send_ctrl_v() {
+            eprntln!("ScreenWriter: Ctrl+V failed: {}", e);
+        }
+
+        self.text_buf.clear();
+        self.last_paste = Instant::now();
+        None
+    }
+}
