@@ -1,44 +1,88 @@
 //! Core application module.
 //!
-//! Responsible for orchestrating the application's workflow: receiving, processing,
-//! and sending recognized text to user interface input fields. Spawns its own thread
-//! for operation, as the main thread is reserved for the UI.
+//! Responsible for orchestrating the application's processing pipeline.
+//! Creates all pipeline stages, wires them together via channels,
+//! and manages their lifecycle.
 //!
-//! During initialization, it creates all necessary working structures. These structures,
-//! in turn, spawn their own threads and coroutines if needed.
+//! # PIPELINE
+//! TcpServer -> Lexer -> TextProcessor -> ScreenWriter
+//!
+//! Each stage runs in its own thread and communicates via `mpsc` channels.
+//! An independent `UserActivityTracker` runs in a separate thread.
+//!
+//! # SHUTDOWN
+//! Cascading channel closure: when the TCP server stops, it drops its sender,
+//! which causes each downstream stage to exit its blocking `recv()` loop in sequence.
 
-use std::thread;
-use hobolib::{eprntln, prntln};
+use std::sync::mpsc;
+use hobolib::prntln;
+use crate::lexeme_transfer::LexemeTransfer;
+use crate::lexer::Lexer;
+use crate::screen_writer::ScreenWriter;
+use crate::tcp_server::TcpServer;
+use crate::text_processor::TextProcessor;
+use crate::user_activity_tracker::UserActivityTracker;
+use crate::screen_transfer::ScreenTransfer;
 
 pub struct Core {
-    // Thread handle. Used during shutdown to perform join() from the main thread.
-    handle: Option<thread::JoinHandle<()>>
+    // Pipeline stages are stored in order.
+    // They will be dropped in reverse field order (Rust guarantees this),
+    // but actual shutdown is driven by cascading channel closure, not drop order.
+    _tcp_server: TcpServer,
+    _lexer: Lexer,
+    _text_processor: TextProcessor,
+    _screen_writer: ScreenWriter,
+    _user_activity_tracker: UserActivityTracker,
 }
 
 impl Core {
 
     /// Constructor.
+    ///
+    /// Creates the full processing pipeline:
+    /// 1. Allocates three `mpsc` channels to connect the stages.
+    /// 2. Spawns all pipeline stages, each in its own thread.
+    /// 3. Spawns the independent `UserActivityTracker`.
     pub fn new() -> Self {
 
-        // Initialize and return the instance.
+        // Channel: TcpServer -> Lexer (carries raw text chunks).
+        let (text_tx, text_rx) = mpsc::channel::<String>();
+
+        // Channel: Lexer -> TextProcessor (carries parsed lexemes).
+        let (lexeme_tx, lexeme_rx) = mpsc::channel::<LexemeTransfer>();
+
+        // Channel: TextProcessor -> ScreenWriter (carries prepared write commands).
+        let (write_cmd_tx, write_cmd_rx) = mpsc::channel::<ScreenTransfer>();
+
+        // Spawn pipeline stages in forward order.
+        let tcp_server = TcpServer::new(text_tx);
+        let lexer = Lexer::new(text_rx, lexeme_tx);
+        let text_processor = TextProcessor::new(lexeme_rx, write_cmd_tx);
+        let screen_writer = ScreenWriter::new(write_cmd_rx);
+
+        // Spawn independent tracker.
+        let user_activity_tracker = UserActivityTracker::new();
+
+        prntln!("Core: pipeline started");
+
         Core {
-            // handle: Some(handle)
-            handle: None
+            _tcp_server: tcp_server,
+            _lexer: lexer,
+            _text_processor: text_processor,
+            _screen_writer: screen_writer,
+            _user_activity_tracker: user_activity_tracker,
         }
     }   // new()
+
 }   // impl Core
 
 impl Drop for Core {
 
     /// Destructor.
-    /// Waits for the core thread to finish and checks for panics.
+    /// Pipeline stages are dropped in reverse field order.
+    /// Actual thread termination is handled by each stage's own `Drop` impl.
     fn drop(&mut self) {
-
-        if let Err(panic_payload) = self.handle.take().unwrap().join() {
-            // Thread panicked, log the error.
-            eprntln!("Core thread panicked: {:?}", panic_payload);
-        }   // if
-
-        prntln!("Core thread dropped");
+        prntln!("Core dropped");
     }
+
 }   // impl Drop for Core

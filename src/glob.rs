@@ -1,7 +1,6 @@
 mod conf_file;
 mod app_state;
 
-use crate::glob::app_state::STATE;
 use crate::glob::conf_file::CONFIG;
 
 /// Initializes global application states.
@@ -17,17 +16,7 @@ pub fn init() {
     drop(CONFIG.lock().unwrap());
 }   // init()
 
-/// Requests application shutdown.
-pub fn request_shutdown() {
-    STATE.lock().unwrap().is_shutdown_requested = true;
-}
-
-/// Returns `true` if application shutdown has been requested.
-pub fn is_shutdown_requested() -> bool {
-    STATE.lock().unwrap().is_shutdown_requested
-}
-
 /// Returns the network port from the configuration.
-pub fn config_port() -> String {
+pub fn appconf_port() -> String {
     CONFIG.lock().unwrap().port.clone()
 }   // config_port()
