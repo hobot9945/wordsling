@@ -20,10 +20,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 use hobolib::clipboard::set_clipboard_text;
-use hobolib::eprntln;
 use hobolib::keyboard::{send_backspace, send_ctrl_v};
 use crate::{log_err, log_inf};
-use crate::screen_transfer::ScreenTransfer;
+use crate::core::screen_transfer::ScreenTransfer;
 
 /// Cooldown interval between consecutive paste operations (Ctrl+V).
 const _COOLDOWN_MS: Duration = Duration::from_millis(100);

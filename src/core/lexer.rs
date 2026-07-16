@@ -16,8 +16,7 @@
 
 use std::sync::mpsc::{Receiver, SendError, Sender};
 use std::thread;
-use hobolib::eprntln;
-use crate::lexeme_transfer::LexemeTransfer;
+use crate::core::lexeme_transfer::LexemeTransfer;
 use crate::{log_err, log_inf};
 
 /// Predefined set of punctuation characters.

@@ -24,7 +24,6 @@ use std::thread;
 use std::time::Duration;
 use std::str;
 
-use hobolib::{eprntln, prln};
 use hobolib::glob::is_shutdown_requested;
 use crate::{fatal, glob, log_inf, log_wrn};
 

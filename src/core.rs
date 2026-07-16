@@ -14,16 +14,23 @@
 //! Cascading channel closure: when the TCP server stops, it drops its sender,
 //! which causes each downstream stage to exit its blocking `recv()` loop in sequence.
 
+mod lexeme_transfer;
+mod lexer;
+mod screen_transfer;
+mod screen_writer;
+mod user_activity_tracker;
+mod text_processor;
+
 use std::sync::mpsc;
 use hobolib::prntln;
-use crate::lexeme_transfer::LexemeTransfer;
-use crate::lexer::Lexer;
+use lexeme_transfer::LexemeTransfer;
+use lexer::Lexer;
 use crate::log_inf;
-use crate::screen_writer::ScreenWriter;
+use screen_writer::ScreenWriter;
 use crate::tcp_server::TcpServer;
-use crate::text_processor::TextProcessor;
-use crate::user_activity_tracker::UserActivityTracker;
-use crate::screen_transfer::ScreenTransfer;
+use user_activity_tracker::UserActivityTracker;
+use screen_transfer::ScreenTransfer;
+use crate::core::text_processor::FrankenLab;
 
 pub struct Core {
     // Pipeline stages are stored in order.
@@ -31,7 +38,7 @@ pub struct Core {
     // but actual shutdown is driven by cascading channel closure, not drop order.
     _tcp_server: TcpServer,
     _lexer: Lexer,
-    _text_processor: TextProcessor,
+    _text_processor: FrankenLab,
     _screen_writer: ScreenWriter,
     _user_activity_tracker: UserActivityTracker,
 }
@@ -60,7 +67,7 @@ impl Core {
         // Spawn pipeline stages in forward order.
         let tcp_server = TcpServer::new(text_tx);
         let lexer = Lexer::new(text_rx, lexeme_transfer_tx);
-        let text_processor = TextProcessor::new(lexeme_transfer_rx, screen_transfer_tx);
+        let text_processor = FrankenLab::new(lexeme_transfer_rx, screen_transfer_tx);
         let screen_writer = ScreenWriter::new(screen_transfer_rx);
 
         // Spawn independent tracker.

@@ -24,13 +24,7 @@ use crate::core::Core;
 
 mod core;
 mod glob;
-mod lexeme_transfer;
-mod lexer;
-mod screen_writer;
 mod tcp_server;
-mod text_processor;
-mod user_activity_tracker;
-mod screen_transfer;
 mod macros;
 
 fn main() {
