@@ -6,6 +6,7 @@
 use std::sync::{LazyLock, Mutex};
 use serde::{Deserialize, Serialize};
 use hobolib::misc::toml_interface::{read_toml_file, write_toml_file};
+use crate::fatal;
 
 const CONFIG_FILE_NAME: &str = "conf.toml";
 
@@ -47,7 +48,7 @@ impl Config {
                     *self = loaded_config;
                 }
                 Err(e) => {
-                    panic!("Failed to load configuration file '{}': {}", CONFIG_FILE_NAME, e);
+                    fatal!("Failed to load configuration file '{}': {}", CONFIG_FILE_NAME, e);
                 }
             }
         } else {

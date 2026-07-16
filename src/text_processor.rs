@@ -18,6 +18,7 @@ use std::sync::mpsc::{Receiver, SendError, Sender};
 use std::thread;
 use hobolib::eprntln;
 use crate::lexeme_transfer::LexemeTransfer;
+use crate::{log_err, log_inf};
 use crate::screen_transfer::ScreenTransfer;
 
 pub struct TextProcessor {
@@ -60,11 +61,11 @@ impl Drop for TextProcessor {
 
         if let Some(handle) = self._handle.take() {
             if let Err(panic_payload) = handle.join() {
-                eprntln!("TextProcessor thread panicked: {:?}", panic_payload);
+                log_err!("TextProcessor thread panicked: {:?}", panic_payload);
             }   // if
         }   // if
 
-        hobolib::prntln!("TextProcessor thread dropped");
+        log_inf!("TextProcessor thread dropped");
     }
 }   // impl Drop for TextProcessor
 
@@ -79,14 +80,14 @@ impl Drop for TextProcessor {
 ///
 /// # Parameters
 /// - `lexeme_rx`: receiver end of the channel carrying parsed lexemes from the lexer.
-/// - `write_cmd_tx`: sender end of the channel carrying screen transfer commands to the screen writer.
+/// - `screen_cmd_tx`: sender end of the channel carrying screen transfer commands to the screen writer.
 ///
 /// # Returns
 /// - `Ok(())` if the input channel was closed normally (lexer stopped).
 /// - `Err(SendError)` if the output channel was closed (screen writer stopped).
 fn _processor_loop(
     lexeme_rx: Receiver<LexemeTransfer>,
-    write_cmd_tx: Sender<ScreenTransfer>,
+    screen_cmd_tx: Sender<ScreenTransfer>,
 ) -> Result<(), SendError<ScreenTransfer>> {
 
     for lexeme in lexeme_rx {
@@ -94,19 +95,19 @@ fn _processor_loop(
         match lexeme {
 
             LexemeTransfer::WordPart(text) => {
-                write_cmd_tx.send(ScreenTransfer::Text(text))?;
+                screen_cmd_tx.send(ScreenTransfer::Text(text))?;
             }
 
             LexemeTransfer::Whitespace(c) => {
-                write_cmd_tx.send(ScreenTransfer::Text(c.to_string()))?;
+                screen_cmd_tx.send(ScreenTransfer::Text(c.to_string()))?;
             }
 
             LexemeTransfer::Punctuation(c) => {
-                write_cmd_tx.send(ScreenTransfer::Text(c.to_string()))?;
+                screen_cmd_tx.send(ScreenTransfer::Text(c.to_string()))?;
             }
 
             LexemeTransfer::BackspaceCount(n) => {
-                write_cmd_tx.send(ScreenTransfer::Backspace(n as usize))?;
+                screen_cmd_tx.send(ScreenTransfer::Backspace(n as usize))?;
             }
 
             // Non-significant lexemes: silently consumed at this stage.
@@ -115,6 +116,9 @@ fn _processor_loop(
             | LexemeTransfer::EraseStart
             | LexemeTransfer::EraseEnd
             | LexemeTransfer::Stabilization => {}
+
+            // just a stub for now
+            LexemeTransfer::UserActivityDetected => {}
 
         }   // match
 

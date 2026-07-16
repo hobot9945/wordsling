@@ -26,7 +26,7 @@ use std::str;
 
 use hobolib::{eprntln, prln};
 use hobolib::glob::is_shutdown_requested;
-use crate::glob;
+use crate::{fatal, glob, log_inf, log_wrn};
 
 /// Represents the connection interface with the mobile phone.
 #[derive(Debug)]
@@ -146,14 +146,14 @@ impl TcpServer {
         let listener = match TcpListener::bind(&bind_addr) {
             Ok(lst) => lst,
             Err(err) => {
-                hobolib::fatal!("Failed to bind phone socket listener to {}: {}", bind_addr, err);
+                fatal!("Failed to bind phone socket listener to {}: {}", bind_addr, err);
                 return;
             }
         };
 
         // Non-blocking listener to periodically check for shutdown.
         if let Err(err) = listener.set_nonblocking(true) {
-            hobolib::fatal!("Failed to set listener non-blocking: {}", err);
+            fatal!("Failed to set listener non-blocking: {}", err);
             return;
         }
 
@@ -164,7 +164,7 @@ impl TcpServer {
 
             match listener.accept() {
                 Ok((stream, _addr)) => {
-                    prln!("Tcp server: New connection established.");
+                    log_inf!("Tcp server: New connection established.");
                     
                     // Set timeouts on the new stream.
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(Self::SOCKET_READ_TIMEOUT_MS)));
@@ -179,7 +179,7 @@ impl TcpServer {
                     thread::sleep(Duration::from_millis(Self::LISTENER_POLL_MS));
                 }
                 Err(err) => {
-                    prln!("Tcp server: Error accepting connection: {}", err);
+                    log_inf!("Tcp server: Error accepting connection: {}", err);
                     thread::sleep(Duration::from_secs(10));
                 }
             }
@@ -240,7 +240,7 @@ impl TcpServer {
             if let Some(stream) = current_stream.as_mut() {
                 match stream.read(&mut raw_buf) {
                     Ok(0) => {
-                        prln!("Phone interface: Connection closed by client (EOF).");
+                        log_inf!("Phone interface: Connection closed by client (EOF).");
                         current_stream = None;
                         *write_connect.lock().unwrap() = None;
                     }
@@ -252,7 +252,7 @@ impl TcpServer {
                         // Normal read timeout, allows the loop to check `is_shutdown_requested()`
                     }
                     Err(err) => {
-                        prln!("Phone interface: Read error: {}", err);
+                        log_inf!("Phone interface: Read error: {}", err);
                         current_stream = None;
                         *write_connect.lock().unwrap() = None;
                     }
@@ -312,12 +312,12 @@ impl TcpServer {
                     // The error is at the very beginning of the buffer.
                     if let Some(error_len) = utf8_error.error_len() {
                         // Invalid UTF-8 bytes encountered. Discard them to recover.
-                        eprntln!("Tcp server: Dropping {} invalid UTF-8 bytes.", error_len);
+                        log_wrn!("Tcp server: Dropping {} invalid UTF-8 bytes.", error_len);
                         buffer.drain(..error_len);
                         continue;
                     } else {
                         // Incomplete UTF-8 sequence at the end. Wait for more bytes.
-prln!("Tcp server: принята часть UTF-8 символа в конце посылки.");
+                        log_inf!("Tcp server: принята часть UTF-8 символа в конце посылки.");
                         break;
                     }   // if
                 }
@@ -339,6 +339,6 @@ impl Drop for TcpServer {
         if let Some(handle) = self.read_handle.take() {
             let _ = handle.join();
         }
-        prln!("Tcp server threads dropped.");
+        log_inf!("Tcp server threads dropped.");
     }
 }

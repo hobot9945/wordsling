@@ -13,7 +13,7 @@
 //! Stub implementation. No actual monitoring is performed.
 
 use std::thread;
-use hobolib::eprntln;
+use crate::{log_err, log_inf};
 
 pub struct UserActivityTracker {
     _handle: Option<thread::JoinHandle<()>>,
@@ -46,11 +46,11 @@ impl Drop for UserActivityTracker {
 
         if let Some(handle) = self._handle.take() {
             if let Err(panic_payload) = handle.join() {
-                eprntln!("UserActivityTracker thread panicked: {:?}", panic_payload);
+                log_err!("UserActivityTracker thread panicked: {:?}", panic_payload);
             }   // if
         }   // if
 
-        hobolib::prntln!("UserActivityTracker thread dropped");
+        log_inf!("UserActivityTracker thread dropped");
     }
 }   // impl Drop for UserActivityTracker
 

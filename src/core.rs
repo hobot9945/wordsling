@@ -18,6 +18,7 @@ use std::sync::mpsc;
 use hobolib::prntln;
 use crate::lexeme_transfer::LexemeTransfer;
 use crate::lexer::Lexer;
+use crate::log_inf;
 use crate::screen_writer::ScreenWriter;
 use crate::tcp_server::TcpServer;
 use crate::text_processor::TextProcessor;
@@ -49,21 +50,23 @@ impl Core {
         let (text_tx, text_rx) = mpsc::channel::<String>();
 
         // Channel: Lexer -> TextProcessor (carries parsed lexemes).
-        let (lexeme_tx, lexeme_rx) = mpsc::channel::<LexemeTransfer>();
+        let (lexeme_transfer_tx, lexeme_transfer_rx) = 
+            mpsc::channel::<LexemeTransfer>();
 
-        // Channel: TextProcessor -> ScreenWriter (carries prepared write commands).
-        let (write_cmd_tx, write_cmd_rx) = mpsc::channel::<ScreenTransfer>();
+        // Channel: TextProcessor -> ScreenWriter (carries output commands for focused window).
+        let (screen_transfer_tx, screen_transfer_rx) = 
+            mpsc::channel::<ScreenTransfer>();
 
         // Spawn pipeline stages in forward order.
         let tcp_server = TcpServer::new(text_tx);
-        let lexer = Lexer::new(text_rx, lexeme_tx);
-        let text_processor = TextProcessor::new(lexeme_rx, write_cmd_tx);
-        let screen_writer = ScreenWriter::new(write_cmd_rx);
+        let lexer = Lexer::new(text_rx, lexeme_transfer_tx);
+        let text_processor = TextProcessor::new(lexeme_transfer_rx, screen_transfer_tx);
+        let screen_writer = ScreenWriter::new(screen_transfer_rx);
 
         // Spawn independent tracker.
         let user_activity_tracker = UserActivityTracker::new();
 
-        prntln!("Core: pipeline started");
+        log_inf!("Core: pipeline started");
 
         Core {
             _tcp_server: tcp_server,

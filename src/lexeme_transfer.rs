@@ -1,7 +1,7 @@
 //! lexeme_transfer — LexemeTransfer type definition.
 //!
-//! Defines the set of lexemes produced by the lexer.
-//! This is the data contract between the lexer and the post-lexical text processor.
+//! Defines the set of lexemes produced by the lexer or user activity tracker.
+//! This is the data contract between the post-lexical text processor and it's counterparts.
 //!
 //! # RESPONSIBILITY
 //! - Provide a single, shared definition of the `LexemeTransfer` enum used across pipeline stages.
@@ -16,6 +16,9 @@
 /// keeping the protocol visible to downstream processors.
 #[derive(Debug, PartialEq)]
 pub enum LexemeTransfer {
+
+    // Phone events.
+
     /// Beginning of a word.
     WordStart,
     /// A fragment of a word (already lowercased by the lexer).
@@ -34,4 +37,10 @@ pub enum LexemeTransfer {
     EraseEnd,
     /// Stabilization marker: `*`.
     Stabilization,
+
+    // User events
+
+    // User has moved the mouse or touched a key.
+    UserActivityDetected
+
 }   // Lexeme

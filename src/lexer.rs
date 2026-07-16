@@ -18,6 +18,7 @@ use std::sync::mpsc::{Receiver, SendError, Sender};
 use std::thread;
 use hobolib::eprntln;
 use crate::lexeme_transfer::LexemeTransfer;
+use crate::{log_err, log_inf};
 
 /// Predefined set of punctuation characters.
 const PUNCTUATION: &[char] = &['.', ',', ';', ':', '?', '!', '#', '/', '\'', '@', '-'];
@@ -74,11 +75,11 @@ impl Drop for Lexer {
 
         if let Some(handle) = self._handle.take() {
             if let Err(panic_payload) = handle.join() {
-                eprntln!("Lexer thread panicked: {:?}", panic_payload);
+                log_err!("Lexer thread panicked: {:?}", panic_payload);
             }   // if
         }   // if
 
-        hobolib::prntln!("Lexer thread dropped");
+        log_inf!("Lexer thread dropped");
     }
 }   // impl Drop for Lexer
 
@@ -149,7 +150,7 @@ fn _lexer_loop(
                     } else {
                         // Malformed erase command: non-digit character inside [n].
                         // This is a programming error on the Android side — log and discard.
-                        eprntln!("Lexer: malformed erase command: '[{}{}', discarding", digits, c);
+                        log_err!("Lexer: malformed erase command: '[{}{}', discarding", digits, c);
                         state = _LexerState::_Normal;
                     }   // if
                 }   // _InEraseCommand
