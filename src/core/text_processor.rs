@@ -74,14 +74,11 @@ impl Drop for FrankenLab {
 }   // impl Drop for FrankenLab
 
 impl FrankenLab {
-    /// Transparent pass-through processor loop.
+    /// Text processor loop.
     ///
-    /// Forwards all significant lexemes (text, punctuation, whitespace, backspaces)
-    /// to the screen writer without modification. Non-significant lexemes
-    /// (`WordStart`, `WordEnd`, `EraseStart`, `EraseEnd`, `Stabilization`)
-    /// are silently consumed.
-    ///
-    /// This will be replaced with full post-lexical processing later.
+    /// Delegates all protocol parsing and text manipulation to `SurgeTable`.
+    /// Acts as a dispatcher: feeds lexemes to the table and forwards the
+    /// generated screen transfers to the screen writer.
     ///
     /// # Parameters
     /// - `lexeme_rx`: receiver end of the channel carrying parsed lexemes from the lexer.
@@ -94,37 +91,20 @@ impl FrankenLab {
         lexeme_rx: Receiver<LexemeTransfer>,
         screen_cmd_tx: Sender<ScreenTransfer>,
     ) -> Result<(), SendError<ScreenTransfer>> {
+
+        // The surgical table must outlive individual lexemes to preserve state.
+        let mut surge_table = SurgeTable::new();
+
         for lexeme in lexeme_rx {
 
-            let mut surge_table = SurgeTable::new();
+            // 1. Feed the lexeme to the surgical table.
+            surge_table.process_lexeme(&lexeme);
 
-            match lexeme {
-                LexemeTransfer::WordPart(text) => {
-                    screen_cmd_tx.send(ScreenTransfer::Text(text))?;
-                }
-
-                LexemeTransfer::Whitespace(c) => {
-                    screen_cmd_tx.send(ScreenTransfer::Text(c.to_string()))?;
-                }
-
-                LexemeTransfer::Punctuation(c) => {
-                    screen_cmd_tx.send(ScreenTransfer::Text(c.to_string()))?;
-                }
-
-                LexemeTransfer::BackspaceCount(n) => {
-                    screen_cmd_tx.send(ScreenTransfer::Backspace(n as usize))?;
-                }
-
-                // Non-significant lexemes: silently consumed at this stage.
-                LexemeTransfer::WordStart
-                | LexemeTransfer::WordEnd
-                | LexemeTransfer::EraseStart
-                | LexemeTransfer::EraseEnd
-                | LexemeTransfer::Stabilization => {}
-
-                // just a stub for now
-                LexemeTransfer::UserActivityDetected => {}
-            }   // match
+            // 2. Extract generated screen commands and send them to the writer.
+            let transfers = surge_table.pop_screen_transfers();
+            for transfer in transfers {
+                screen_cmd_tx.send(transfer)?;
+            }
 
         }   // for lexeme
 

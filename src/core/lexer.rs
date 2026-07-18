@@ -130,9 +130,7 @@ fn _lexer_loop(
 
     // Main loop: read chunks until the input channel is closed.
     for chunk in text_rx {
-
         for c in chunk.chars() {
-
             match &mut state {
 
                 // --- Inside an erase command: reading digits after '[' ---
