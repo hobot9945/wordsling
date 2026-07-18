@@ -354,4 +354,4 @@ mod tests {
             assert_eq!(got, exp, "Mismatch at lexeme #{}", i);
         }   // for
     }   // test_spec_example()
-}   // mod tests
+}   // mod core_tests

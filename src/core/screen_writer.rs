@@ -14,12 +14,13 @@
 //! - Receive screen transfer events from the text processor.
 //! - Accumulate text in a debounced paste buffer to avoid clipboard race conditions.
 //! - Execute backspaces by first consuming the local buffer, then emitting real keystrokes.
+//! - Preserve the user's clipboard content across paste sessions.
 //! - Contain no protocol parsing or text interpretation logic.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
-use hobolib::clipboard::set_clipboard_text;
+use hobolib::clipboard::{get_clipboard_text, set_clipboard_text};
 use hobolib::keyboard::{send_backspace, send_ctrl_v};
 use crate::{log_err, log_inf};
 use crate::core::screen_transfer::ScreenTransfer;
@@ -28,7 +29,13 @@ use crate::core::screen_transfer::ScreenTransfer;
 const _COOLDOWN_MS: Duration = Duration::from_millis(100);
 
 /// Minimum delay between consecutive backspace keystrokes sent to the OS.
-const _BACKSPACE_DELAY_MS: Duration = Duration::from_millis(10);
+///
+/// Originally introduced to prevent race conditions during rapid text deletion.
+/// Observation showed that artificial delays are unnecessary because the OS
+/// places keystrokes into the system input queue, guaranteeing safe sequential
+/// execution. The value is currently set to zero, but the parameter is kept
+/// for potential future tuning.
+const _BACKSPACE_DELAY_MS: Duration = Duration::from_millis(0);
 
 /// Minimum delay required between updating the clipboard and pasting.
 const _CLIPBOARD_ASSIMILATION_MS: Duration = Duration::from_millis(20);
@@ -69,7 +76,7 @@ impl ScreenWriter {
     /// - `screen_cmd_rx`: receiver end of the channel carrying screen transfer commands.
     fn _screen_writer_loop(screen_cmd_rx: Receiver<ScreenTransfer>) {
 
-        let mut paste_buffer = _PasteBuffer::_new();
+        let mut paste_buffer = _Debouncer::_new();
         let mut recv_timeout: Option<Duration> = None;
 
         loop {
@@ -85,18 +92,32 @@ impl ScreenWriter {
 
             // Dispatch the event to the paste buffer.
             recv_timeout = match recv_result {
+
                 Ok(ScreenTransfer::Text(text)) => {
                     paste_buffer._push_text(&text)
                 }
+
                 Ok(ScreenTransfer::Backspace(count)) => {
                     paste_buffer._apply_backspaces(count)
                 }
+
                 Err(RecvTimeoutError::Timeout) => {
                     paste_buffer._flush()
                 }
+
                 Err(RecvTimeoutError::Disconnected) => {
-                    // Input channel closed. Flush remaining text and exit.
-                    let _ = paste_buffer._flush();
+                    // Channel is closed. We must not only print the remaining tail,
+                    // but also wait long enough to restore the clipboard if needed.
+                    let mut tail_timeout = paste_buffer._flush();
+
+                    while let Some(duration) = tail_timeout {
+                        thread::sleep(duration);
+
+                        // paste_buffer was clear by the previous _flash(). New call of _flush(),
+                        // when paste_buffer is empty will restore the clipboard original content.
+                        tail_timeout = paste_buffer._flush();
+                    }   // while
+
                     break;
                 }
             };  // match
@@ -122,7 +143,7 @@ impl Drop for ScreenWriter {
 
 
 // =============================================================================
-// _PasteBuffer — debounced clipboard paste manager
+// _Debouncer — debounced clipboard paste manager
 // =============================================================================
 
 /// Debounced clipboard paste buffer.
@@ -133,24 +154,28 @@ impl Drop for ScreenWriter {
 /// reads stale clipboard content because a new `set_clipboard_text` call
 /// overwrites it before the previous `Ctrl+V` is processed.
 ///
+/// The user's original clipboard content is saved before the first paste
+/// in a session and restored after the last paste completes. This ensures
+/// that dictation does not destroy clipboard data the user copied earlier.
+///
 /// Backspace commands are first applied to the local buffer (free, no OS delay).
 /// Only if the buffer is exhausted, real `send_backspace()` keystrokes are emitted.
-struct _PasteBuffer {
-    _text_buf: String,       // accumulated text not yet pasted
-    _last_paste: Instant,    // timestamp of the last Ctrl+V or Backspace sent to OS
-}   // _PasteBuffer
-
-impl _PasteBuffer {
+struct _Debouncer {
+    _text_buf: String,                    // accumulated text not yet pasted into the target window
+    _last_paste: Instant,                 // timestamp of the last OS interaction (paste or backspace)
+    _saved_clipboard_text: Option<String>,// user's clipboard text; Some(_) also indicates an active session
+}   // _Debouncer
+impl _Debouncer {
 
     /// Constructor.
     ///
     /// # Parameters
     fn _new() -> Self {
-
-        _PasteBuffer {
+        _Debouncer {
             _text_buf: String::new(),
             // Initialize in the past so the first paste can happen immediately.
             _last_paste: Instant::now() - _COOLDOWN_MS,
+            _saved_clipboard_text: None,
         }
     }   // _new()
 
@@ -177,12 +202,12 @@ impl _PasteBuffer {
     ///   at most `duration` before triggering a flush).
     fn _recv_timeout(&self) -> Option<Duration> {
 
-        if self._text_buf.is_empty() {
-            None
-        } else {
+        if !self._text_buf.is_empty() || self._saved_clipboard_text.is_some() {
             Some(self._calculate_remaining_cooldown())
+        } else {
+            None
         }   // if
-    }   // _current_timeout()
+    }   // _recv_timeout()
 
     /// Appends text to the internal buffer and updates the clipboard.
     ///
@@ -211,10 +236,13 @@ impl _PasteBuffer {
             return None;
         }   // if
 
+        // Save the user's original text before our first clipboard override.
+        self._capture_clipboard_if_needed();
+
         // Update clipboard immediately — cheap OS call.
         // Content will be ready when the cooldown expires.
         if let Err(e) = set_clipboard_text(&self._text_buf) {
-            log_err!("PasteBuffer: clipboard update failed: {}", e);
+            log_err!("Debouncer: clipboard update failed: {}", e);
         }   // if
 
         // Calculate remaining time until the cooldown allows a new paste.
@@ -251,14 +279,22 @@ impl _PasteBuffer {
                 self._text_buf.pop();
             }   // for
 
-            // If the buffer is now empty, there's nothing to flush.
+            // If the local buffer becomes empty, the unprinted tail was consumed locally.
+            // WARNING: We must NOT instantly restore the clipboard here, because
+            // a PREVIOUS Ctrl+V operation might have been emitted just milliseconds ago.
+            // Instead, we return the remaining cooldown. The event loop will wait it out,
+            // fire a Timeout, and call _flush() which will safely restore the clipboard.
             if self._text_buf.is_empty() {
-                return None;
+                if self._saved_clipboard_text.is_some() {
+                    return Some(self._calculate_remaining_cooldown());
+                } else {
+                    return None;
+                }   // if
             }   // if
 
             // Update clipboard to reflect the truncated buffer.
             if let Err(e) = set_clipboard_text(&self._text_buf) {
-                log_err!("PasteBuffer: clipboard update failed: {}", e);
+                log_err!("Debouncer: clipboard update failed: {}", e);
             }   // if
 
             // Ensure the OS has time to assimilate the new clipboard state.
@@ -285,7 +321,7 @@ impl _PasteBuffer {
         // Step 3: emit real backspace keystrokes to the OS.
         for _ in 0..count {
             if let Err(e) = send_backspace() {
-                log_err!("PasteBuffer: send_backspace failed: {}", e);
+                log_err!("Debouncer: send_backspace failed: {}", e);
                 break;
             }   // if
             thread::sleep(_BACKSPACE_DELAY_MS);
@@ -293,20 +329,44 @@ impl _PasteBuffer {
 
         // Reset the cooldown timer after OS interaction.
         self._last_paste = Instant::now();
+
+        // After emitting real backspaces, our clipboard session is effectively over:
+        // any preceding paste operation is guaranteed to have finished processing
+        // thanks to the cooldown wait above.
+        self._finish_clipboard_session();
         None
     }   // _apply_backspaces()
 
     /// Flushes the accumulated text to the focused window via `Ctrl+V`.
     ///
-    /// If the buffer is empty, does nothing. Otherwise, waits out the remaining
-    /// cooldown interval (if any), sends the paste keystroke, clears the buffer,
-    /// and resets the cooldown timer.
+    /// If the buffer is empty and a clipboard session is active, waits out
+    /// the remaining cooldown and restores the user's original clipboard content.
+    ///
+    /// If the buffer is non-empty, waits out the remaining cooldown,
+    /// sends the paste keystroke, clears the buffer, and resets the cooldown timer.
     ///
     /// # Returns
-    /// Always `None` (the buffer is empty after flush).
+    /// - `None` if nothing remains to do (buffer empty, clipboard restored or inactive).
+    /// - `Some(duration)` if the clipboard session is still active after a paste
+    ///   and the caller must wait before restoring.
     fn _flush(&mut self) -> Option<Duration> {
 
+        // If there is nothing to print, but the clipboard session is still active,
+        // it is time to restore the user's original clipboard content.
         if self._text_buf.is_empty() {
+            if self._saved_clipboard_text.is_some() {
+                // CRITICAL SAFETY GUARD:
+                // If _flush() was invoked prematurely (e.g. channel Disconnected
+                // right after a paste), we MUST wait out the remaining cooldown
+                // synchronously before restoring the clipboard. Otherwise, we break
+                // the async Ctrl+V operation in the target window.
+                let delay = self._calculate_remaining_cooldown();
+                if delay > Duration::ZERO {
+                    thread::sleep(delay);
+                }   // if
+
+                self._finish_clipboard_session();
+            }   // if
             return None;
         }   // if
 
@@ -317,12 +377,50 @@ impl _PasteBuffer {
         }   // if
 
         if let Err(e) = send_ctrl_v() {
-            log_err!("PasteBuffer: Ctrl+V failed: {}", e);
+            log_err!("Debouncer: Ctrl+V failed: {}", e)
+
         }   // if
 
         self._text_buf.clear();
         self._last_paste = Instant::now();
-        None
+
+        // If the clipboard was overridden, do not restore it immediately:
+        // the target application needs time to process the Ctrl+V and read our text.
+        // We return the cooldown duration to let the main loop wait asynchronously.
+        if self._saved_clipboard_text.is_some() {
+            Some(_COOLDOWN_MS)
+        } else {
+            None
+        }   // if
     }   // _flush()
 
-}   // impl _PasteBuffer
+    /// Saves the text content of the system clipboard before our first override.
+    ///
+    /// The capture is performed only once per active clipboard paste session
+    /// (when `_saved_clipboard_text` is `None`). If the clipboard contains non-text
+    /// data (like an image) or is empty, we store an empty string. This allows us
+    /// to mark the session as "active" without crashing.
+    fn _capture_clipboard_if_needed(&mut self) {
+
+        if self._saved_clipboard_text.is_none() {
+            // Read text. If it fails (e.g. image or empty), default to an empty string.
+            let text = get_clipboard_text().unwrap_or_default();
+            self._saved_clipboard_text = Some(text);
+        }   // if
+    }   // _capture_clipboard_if_needed()
+
+    /// Ends the current clipboard paste session.
+    ///
+    /// If there is a saved clipboard string and it is not empty, it restores it
+    /// back to the system clipboard. The session is deactivated by `take()`.
+    fn _finish_clipboard_session(&mut self) {
+
+        if let Some(text) = self._saved_clipboard_text.take() {
+            if !text.is_empty() {
+                if let Err(e) = set_clipboard_text(&text) {
+                    log_err!("Debouncer: failed to restore saved clipboard text: {}", e);
+                }   // if
+            }   // if
+        }   // if
+    }   // _finish_clipboard_session()
+}   // impl _Debouncer

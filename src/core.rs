@@ -20,6 +20,7 @@ mod screen_transfer;
 mod screen_writer;
 mod user_activity_tracker;
 mod text_processor;
+mod core_tests;
 
 use std::sync::mpsc;
 use hobolib::prntln;

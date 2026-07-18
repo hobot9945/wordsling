@@ -14,12 +14,17 @@
 //! Transparent pass-through. All significant lexemes are forwarded
 //! to the screen writer without any processing.
 
+#![allow(unused)]
+mod surgical_table;
+
 use std::sync::mpsc::{Receiver, SendError, Sender};
 use std::thread;
 use crate::core::lexeme_transfer::LexemeTransfer;
 use crate::{log_err, log_inf};
 use crate::core::screen_transfer::ScreenTransfer;
+use crate::core::text_processor::surgical_table::SurgeTable;
 
+/// A wrapper around a thread, executing the text_processor state machine.
 pub struct FrankenLab {
     _handle: Option<thread::JoinHandle<()>>,
 }   // FrankenLab
@@ -90,6 +95,9 @@ impl FrankenLab {
         screen_cmd_tx: Sender<ScreenTransfer>,
     ) -> Result<(), SendError<ScreenTransfer>> {
         for lexeme in lexeme_rx {
+
+            let mut surge_table = SurgeTable::new();
+
             match lexeme {
                 LexemeTransfer::WordPart(text) => {
                     screen_cmd_tx.send(ScreenTransfer::Text(text))?;
