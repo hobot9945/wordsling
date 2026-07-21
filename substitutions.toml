@@ -1,0 +1,19 @@
+[[subs_vec]]
+key_phrases = [
+    "левая скобка",
+    "скобка открывается",
+    "left parenthesis",
+    "open parenthesis",
+]
+replacement = "("
+modifier = "suppress_space_after"
+
+[[subs_vec]]
+key_phrases = [
+    "правая скобка",
+    "скобка закрывается",
+    "right parenthesis",
+    "close parenthesis",
+]
+replacement = ")"
+modifier = "suppress_space_before"
