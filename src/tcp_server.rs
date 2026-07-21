@@ -25,7 +25,7 @@ use std::time::Duration;
 use std::str;
 
 use hobolib::glob::is_shutdown_requested;
-use crate::{fatal, glob, log_inf, log_wrn};
+use crate::{glob, log_inf, log_wrn};
 
 /// Represents the connection interface with the mobile phone.
 #[derive(Debug)]
@@ -145,15 +145,13 @@ impl TcpServer {
         let listener = match TcpListener::bind(&bind_addr) {
             Ok(lst) => lst,
             Err(err) => {
-                fatal!("Failed to bind phone socket listener to {}: {}", bind_addr, err);
-                return;
+                panic!("Failed to bind phone socket listener to {}: {}", bind_addr, err);
             }
         };
 
         // Non-blocking listener to periodically check for shutdown.
         if let Err(err) = listener.set_nonblocking(true) {
-            fatal!("Failed to set listener non-blocking: {}", err);
-            return;
+            panic!("Failed to set listener non-blocking: {}", err);
         }
 
         loop {

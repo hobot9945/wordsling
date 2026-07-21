@@ -16,6 +16,8 @@
 
 #![allow(unused)]
 mod surgical_table;
+mod substitution_map;
+mod supplementary_action_map;
 
 use std::sync::mpsc::{Receiver, SendError, Sender};
 use std::thread;
@@ -74,6 +76,7 @@ impl Drop for FrankenLab {
 }   // impl Drop for FrankenLab
 
 impl FrankenLab {
+
     /// Text processor loop.
     ///
     /// Delegates all protocol parsing and text manipulation to `SurgeTable`.
@@ -92,20 +95,17 @@ impl FrankenLab {
         screen_cmd_tx: Sender<ScreenTransfer>,
     ) -> Result<(), SendError<ScreenTransfer>> {
 
-        // The surgical table must outlive individual lexemes to preserve state.
         let mut surge_table = SurgeTable::new();
 
         for lexeme in lexeme_rx {
 
-            // 1. Feed the lexeme to the surgical table.
+            // Feed the lexeme to the surgical table.
             surge_table.process_lexeme(&lexeme);
 
-            // 2. Extract generated screen commands and send them to the writer.
-            let transfers = surge_table.pop_screen_transfers();
-            for transfer in transfers {
+            // Forward generated screen commands to the writer.
+            for transfer in surge_table.pop_screen_transfers() {
                 screen_cmd_tx.send(transfer)?;
-            }
-
+            }   // for
         }   // for lexeme
 
         Ok(())

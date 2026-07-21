@@ -361,12 +361,16 @@ pub enum ScreenTransfer {
 
 ### 6.3. Implementation status
 
-Currently a transparent pass-through. All significant lexemes are forwarded
-to the screen writer without processing. Non-significant lexemes
-(`WordStart`, `WordEnd`, `EraseStart`, `EraseEnd`, `Stabilization`)
-are silently consumed.
+FrankenLab has been refactored into a reactive state machine built around an internal
+`SurgeTable`. The `SurgeTable` maintains two separate character buffers (`cutting_board` for
+raw Gboard input and `franken_board` mirroring the host's screen).
 
-Full post-lexical processing is the current development focus.
+It currently enforces Gboard stabilization anchors (`*`) and processes backspace commands safely
+using character-level vectors (`Vec<char>`). While it successfully manages the text stream and
+erasure limits, text substitution logic is still pending.
+
+The next development focus is implementing text substitutions and user-driven
+history manipulation (e.g., custom voice erasures).
 
 ---
 

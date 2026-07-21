@@ -1,12 +1,13 @@
 //! glob.rs
 
-mod conf_file;
+mod conf_toml;
 mod app_state;
 mod log;
+pub(crate) mod substitution_toml;
 
 use std::sync::MutexGuard;
 use hobolib::log::Log;
-use crate::glob::conf_file::CONFIG;
+use crate::glob::conf_toml::CONFIG;
 use crate::glob::log::_LOG;
 
 /// Initializes global application states.
