@@ -333,20 +333,23 @@ Fully implemented and tested.
 The post-lexical text processor (internally named `FrankenLab`) consumes lexemes
 and produces screen transfer commands for the screen writer.
 
+Internally, FrankenLab delegates all text manipulation to the `SurgeTable`
+state machine. FrankenLab itself is just a thin dispatcher: it feeds lexemes
+into the table and forwards the generated `ScreenTransfer` commands to the
+screen writer channel.
+
 ### 6.1. Responsibilities
 
-FrankenLab is expected to:
-- maintain the distinction between stable and unstable text;
-- apply backspace commands to the unstable tail;
-- decide when text is ready to be flushed to the output layer;
-- restore proper capitalization;
-- fix spacing and punctuation details when necessary;
-- perform future text substitutions;
-- interpret future action commands such as "capitalize", "switch language",
-  and similar directives.
+FrankenLab / SurgeTable is responsible for:
+- maintaining the distinction between stable and unstable text;
+- applying Gboard backspace commands to the unstable tail;
+- performing text substitutions with retroactive screen patching;
+- managing substitution rollbacks when Gboard erases previously substituted text;
+- restoring proper capitalization (future, via substitution side effects);
+- interpreting action commands such as "capitalize", "switch language" (future).
 
 This stage is where the system becomes more than a transport bridge.
-It will gradually evolve into the main text-intelligence layer of Wordsling.
+It is the main text-intelligence layer of Wordsling.
 
 ### 6.2. Output contract
 
@@ -359,19 +362,194 @@ pub enum ScreenTransfer {
 }
 ```
 
-### 6.3. Implementation status
+### 6.3. The two boards
 
-FrankenLab has been refactored into a reactive state machine built around an internal
-`SurgeTable`. The `SurgeTable` maintains two separate character buffers (`cutting_board` for
-raw Gboard input and `franken_board` mirroring the host's screen).
+`SurgeTable` maintains two character-level buffers (`Vec<char>`):
 
-It currently enforces Gboard stabilization anchors (`*`) and processes backspace commands safely
-using character-level vectors (`Vec<char>`). While it successfully manages the text stream and
-erasure limits, text substitution logic is still pending.
+- **`cutting_board`** — the raw text stream from Gboard (after lexer
+  decapitalization). This board reflects exactly what Gboard sent,
+  unaffected by substitutions.
 
-The next development focus is implementing text substitutions and user-driven
-history manipulation (e.g., custom voice erasures).
+- **`franken_board`** — the processed text mirroring what the focused
+  Windows input field should contain. This board diverges from the
+  cutting board when a substitution replaces raw text with different text.
 
+Before the first substitution, both boards are identical.
+
+### 6.4. Text substitution mechanism
+
+#### 6.4.1. Design principle: Proactive Print + Eager Replacement
+
+The substitution mechanism is designed for maximum reactivity.
+Every significant lexeme (`WordPart`, `Whitespace`, `Punctuation`) is
+evaluated against the substitution dictionary **before** being written
+to the boards. The evaluation uses a hypothetical candidate string:
+the current tail of the cutting board plus the new lexeme text.
+
+Based on the evaluation result, SurgeTable decides how to write:
+- **No active candidate or no match:** raw text goes into both boards.
+- **Partial match:** raw text goes into both boards; the candidate
+  keeps growing.
+- **Exact match with continuation (eager replacement):** raw text goes
+  only into the cutting board. The franken board receives the
+  replacement text instead. If a longer key is later found, the
+  earlier replacement is undone and the new one applied.
+- **Unambiguous exact match:** the substitution is applied as final.
+
+The cutting board is **not** modified during substitution — it always
+retains the original raw text from Gboard.
+
+#### 6.4.2. Search state
+
+The search state is minimal. No separate query buffer is needed.
+#### 6.4.2. Search state machine
+
+The search state is managed by an explicit FSM with three states:
+
+- **`Idle`** — no candidate is being tracked.
+- **`VacancyOpen`** — a `WordStart` lexeme has arrived; the next
+  `WordPart` is allowed to open a new candidate.
+- **`CandidateGrowing`** — a candidate is active and accumulating
+  text. The candidate carries a `Prong` embryo (start indices in
+  both boards) and a status (`Partial` or `ExactReady`).
+
+A `Punctuation` lexeme can start a candidate directly from `Idle`,
+without needing a preceding `WordStart`.
+#### 6.4.3. Search outcomes
+
+The hypothetical candidate string is looked up in `SubstitutionMap`.
+Four outcomes are possible:
+
+- **`NoMatch`** — the candidate does not match any key and cannot grow
+  into one. If the candidate previously reached `ExactReady` status,
+  that earlier substitution is committed as a prong. The candidate
+  is then reset.
+
+- **`PartialMatch`** — some dictionary key starts with the candidate,
+  but no exact match yet. The candidate keeps growing.
+
+- **`ExactMatchWithContinuation`** — an exact match exists, but a longer
+  key also starts with the same prefix. An eager replacement is applied
+  immediately: the replacement text goes into the franken board, while
+  raw text goes only into the cutting board. If the candidate was
+  already in `ExactReady` state (from a previous shorter match), that
+  earlier replacement is undone first.
+
+- **`ExactMatch`** — unambiguous match. The substitution is applied
+  as final. If a previous eager replacement existed, it is undone
+  before the final one is applied.
+- **`ExactMatch`** — unambiguous match. The substitution is applied
+  as described in 6.4.1.
+
+#### 6.4.4. Stabilization and final search
+
+When a `Stabilization` lexeme arrives while a search candidate is active,
+a `final_search()` is performed. In final mode,
+`ExactMatchWithContinuation` is promoted to `ExactMatch`, so the
+substitution is applied immediately. If no match is found, the candidate
+is simply reset.
+
+### 6.5. The comb and prongs (substitution rollback)
+
+The comb (`_comb: Vec<Prong>`) is an ordered list of active substitution
+records in the unstable region of the text.
+
+Each prong records:
+- `cb_start`, `cb_end` — the range of the original raw key phrase
+  in the cutting board;
+- `fb_start`, `fb_end` — the range of the replacement text
+  in the franken board;
+- `rollback_fn` — an optional function pointer to undo side effects
+  of the substitution (e.g., clear a capitalization flag).
+
+Prongs exist solely for rollback. They are cleared on stabilization,
+because Gboard guarantees it will never erase text before the
+stabilization anchor.
+
+### 6.6. Backspace handling with prongs
+
+When a Gboard `BackspaceCount(N)` arrives, the erase is applied to the
+cutting board first (respecting the stabilization anchor). Then the
+effect on the franken board depends on whether any prongs are affected.
+
+**Case A: no prongs affected.**
+The same N characters are removed from the franken board and
+`ScreenTransfer::Backspace(N)` is generated. Straightforward.
+
+**Case B: a prong is fully covered by the erase.**
+The entire raw key phrase and the entire replacement text are removed
+from their respective boards. The rollback function is called.
+The prong is deleted.
+
+**Case C: a prong is partially covered by the erase.**
+This is the most complex case:
+1. The cutting board loses exactly N raw characters as commanded.
+2. The entire replacement text is removed from the franken board.
+3. The rollback function is called.
+4. The prong is deleted.
+5. The surviving raw tail from the cutting board (starting at the
+   former prong's `cb_start`) is appended to the franken board.
+   This restores identity between the two boards in the affected zone.
+
+### 6.7. Substitution map
+
+The substitution dictionary (`SubstitutionMap`) is backed by a `BTreeMap`
+for efficient prefix search. Keys are stored as-is, without runtime
+normalization. This means keys in `substitutions.toml` must be written
+exactly as they arrive after lexer processing (lowercase for words,
+literal whitespace and punctuation).
+
+The map consists of two parts:
+- **User rules** loaded from `substitutions.toml`.
+- **Built-in technical rules** added programmatically during map
+  construction (e.g., `"."` → `"."` with a `capitalize_next` side
+  effect). These are invisible to the user.
+
+Each entry stores:
+- the replacement text;
+- a `SupplementaryAction` function pointer;
+- an optional `SupplementaryRollback` function pointer.
+
+The supplementary action is called twice per substitution:
+once before the replacement (`WhenApplied::Before`) and once after
+(`WhenApplied::After`). This two-phase call allows actions that need
+to inspect or modify the context on both sides of the replacement.
+
+The rollback function, if present, is stored in the prong and called
+### 6.8. Implementation status
+
+FrankenLab has been refactored into a reactive state machine built around
+`SurgeTable`. The table maintains the two boards, enforces Gboard
+stabilization anchors, and processes backspace commands safely using
+character-level vectors.
+
+`SubstitutionMap` with prefix-aware search (no runtime normalization)
+and `SupplementaryActionMap` with action/rollback pairs are fully
+implemented and tested.
+
+The substitution FSM inside `SurgeTable` is implemented:
+- three-state search automaton (`Idle` / `VacancyOpen` / `CandidateGrowing`);
+- predictive evaluation (hypothetical candidate before board writes);
+- eager replacement for `ExactMatchWithContinuation`;
+- honest undo of earlier eager replacements when a longer key arrives;
+- commit of `ExactReady` candidates on `NoMatch` or stabilization.
+
+Remaining work:
+- Backspace handling with prong-aware rollback (currently simplified).
+- `WordEnd` boundary-aware candidate evaluation.
+- Sliding window pruning of boards.
+- Real implementations of `suppress_space_before` / `suppress_space_after`.
+- Unit tests for substitution scenarios.
+`SurgeTable`. The table maintains the two boards, enforces Gboard
+stabilization anchors, and processes backspace commands safely using
+character-level vectors.
+
+`SubstitutionMap` with prefix-aware search and `SupplementaryActionMap`
+are fully implemented and tested.
+
+The substitution application logic inside `SurgeTable` (search state,
+proactive print, retroactive patch, prong creation, and rollback
+handling) is the current development focus.
 ---
 
 ## 7. Screen writer

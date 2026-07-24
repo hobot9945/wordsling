@@ -17,11 +17,16 @@
 use std::collections::HashMap;
 use crate::core::text_processor::surgical_table::SurgeTable;
 
+pub(super) enum WhenApplied {
+    Before,
+    After,
+}
+
 /// Function pointer type for supplementary rollbacks.
 ///
 /// # Parameters
 /// - `surge_table`: mutable reference to the surgical table.
-pub(super) type SupplementaryRollback = fn(surge_table: &mut SurgeTable);
+pub(super) type SupplementaryRollback = fn(surge_table: &mut SurgeTable, when_applied: WhenApplied);
 
 /// Function pointer type for supplementary actions.
 ///
@@ -32,12 +37,9 @@ pub(super) type SupplementaryRollback = fn(surge_table: &mut SurgeTable);
 ///
 /// # Parameters
 /// - `surge_table`: mutable reference to the surgical table.
-/// - `is_call_before`: `true` if called before the replacement is inserted,
-///   `false` if called after.
-/// # Returns
-/// - function pointer for the rollback function
-pub(super) type SupplementaryAction = fn(surge_table: &mut SurgeTable, is_call_before: bool) ->
-    Option<SupplementaryRollback>;
+/// - `when_applied`: indicates whether the action is called `Before` or `After`
+///   the replacement text is applied.
+pub(super) type SupplementaryAction = fn(surge_table: &mut SurgeTable, when_applied: WhenApplied);
 
 
 /// String-keyed registry of available supplementary actions.
@@ -45,7 +47,7 @@ pub(super) type SupplementaryAction = fn(surge_table: &mut SurgeTable, is_call_b
 /// Used during startup by `SubstitutionMap` to resolve modifier names
 /// from the TOML configuration into callable function pointers.
 pub(super) struct SupplementaryActionMap {
-    _map: HashMap<String, SupplementaryAction>,
+    _map: HashMap<String, (SupplementaryAction, Option<SupplementaryRollback>)>,
 }   // SupplementaryActionMap
 
 impl SupplementaryActionMap {
@@ -58,25 +60,20 @@ impl SupplementaryActionMap {
     pub(super) fn new() -> Self {
         let mut map = HashMap::new();
 
-        map.insert("do_nothing".to_string(), do_nothing as SupplementaryAction);
-        map.insert("suppress_space_before".to_string(), suppress_space_before as SupplementaryAction);
-        map.insert("suppress_space_after".to_string(), suppress_space_after as SupplementaryAction);
+        map.insert("do_nothing".to_string(), (do_nothing as SupplementaryAction, None));
+        map.insert("suppress_space_before".to_string(), (suppress_space_before as SupplementaryAction, None));
+        map.insert("suppress_space_after".to_string(), (suppress_space_after as SupplementaryAction, None));
 
         SupplementaryActionMap {
             _map: map,
         }
     }   // new()
 
-    /// Looks up an action by its string key.
-    ///
-    /// # Parameters
-    /// - `key`: modifier name as it appears in `substitutions.toml`.
-    ///
-    /// # Returns
-    /// `Some(&fn)` if the key is registered, `None` otherwise.
-    pub(super) fn get(&self, key: &str) -> Option<&SupplementaryAction> {
-        self._map.get(key)
-    }   // get()
+    pub(super) fn get_pair(&self, key: &str) -> Option<(SupplementaryAction, Option<SupplementaryRollback>)> {
+        self._map
+            .get(key)
+            .copied()
+    }   // get_pair()
 
 }   // impl SupplementaryActionMap
 
@@ -85,10 +82,7 @@ impl SupplementaryActionMap {
 // =============================================================================
 
 /// Does nothing. Default action for substitutions that need no context adjustment.
-pub(super) fn do_nothing(_surge_table: &mut SurgeTable, _is_call_before: bool)
-    -> Option<SupplementaryRollback>
-{
-    None
+pub(super) fn do_nothing(_surge_table: &mut SurgeTable, _when_applied: WhenApplied) {
 }   // do_nothing()
 
 /// Suppresses whitespace before the replacement text.
@@ -98,10 +92,7 @@ pub(super) fn do_nothing(_surge_table: &mut SurgeTable, _is_call_before: bool)
 ///
 /// Stub: will manipulate the `SurgeTable` franken_board once
 /// the substitution pipeline is fully wired.
-pub(super) fn suppress_space_before(_surge_table: &mut SurgeTable, _is_call_before: bool)
-    -> Option<SupplementaryRollback>
-{
-    None
+pub(super) fn suppress_space_before(_surge_table: &mut SurgeTable, _when_applied: WhenApplied) {
 }   // suppress_space_before()
 
 /// Suppresses whitespace after the replacement text.
@@ -111,8 +102,5 @@ pub(super) fn suppress_space_before(_surge_table: &mut SurgeTable, _is_call_befo
 ///
 /// Stub: will manipulate the `SurgeTable` franken_board once
 /// the substitution pipeline is fully wired.
-pub(super) fn suppress_space_after(_surge_table: &mut SurgeTable, _is_call_before: bool)
-    -> Option<SupplementaryRollback>
-{
-    None
+pub(super) fn suppress_space_after(_surge_table: &mut SurgeTable, _when_applied: WhenApplied) {
 }   // suppress_space_after()

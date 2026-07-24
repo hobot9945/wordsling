@@ -27,6 +27,7 @@ use std::ops::Bound;
 use crate::core::text_processor::supplementary_action_map::{
     SupplementaryAction,
     SupplementaryActionMap,
+    SupplementaryRollback,
 };
 use crate::glob::substitution_toml::{SubstitutionToml, SUBSTITUTIONS_FILE_NAME};
 
@@ -34,10 +35,12 @@ use crate::glob::substitution_toml::{SubstitutionToml, SUBSTITUTIONS_FILE_NAME};
 ///
 /// It contains:
 /// - replacement text to be emitted instead of the matched key phrase;
-/// - a supplementary action to adjust surrounding spacing or other behavior.
+/// - a supplementary action to adjust surrounding context or other behavior;
+/// - an optional rollback function for undoing side effects.
 pub(super) struct SubstitutionElement {
     _replacement_text: String,
     _action: SupplementaryAction,
+    _rollback: Option<SupplementaryRollback>,
 }   // SubstitutionElement
 
 impl SubstitutionElement {
@@ -58,6 +61,15 @@ impl SubstitutionElement {
     pub(super) fn action(&self) -> SupplementaryAction {
         self._action
     }   // action()
+
+    /// Returns the rollback function associated with this entry.
+    ///
+    /// # Returns
+    /// An optional function pointer used to undo side effects
+    /// if the substitution is later rolled back.
+    pub(super) fn rollback(&self) -> Option<SupplementaryRollback> {
+        self._rollback
+    }   // rollback()
 
 }   // impl SubstitutionElement
 
@@ -84,10 +96,17 @@ pub(super) enum SubstitutionSearchResult<'a> {
 
 /// In-memory substitution dictionary.
 ///
-/// Keys are stored in normalized form:
-/// - trimmed;
-/// - internal whitespace collapsed to single spaces;
-/// - lowercased.
+/// Keys are stored as-is.
+///
+/// Important:
+/// search is performed without runtime normalization.
+/// Therefore, keys in `substitutions.toml` must be written exactly
+/// as they are expected to arrive after the lexer.
+///
+/// Practical consequences:
+/// - word-based keys must be written in lowercase,
+///   because the lexer already lowercases `WordPart`;
+/// - whitespace and punctuation are matched literally.
 ///
 /// `BTreeMap` is used because all keys sharing the same prefix form one contiguous
 /// lexical range. That makes prefix search simple and deterministic.
@@ -102,8 +121,8 @@ impl SubstitutionMap {
     /// This constructor is intentionally strict:
     /// - malformed TOML causes panic;
     /// - unknown modifiers cause panic;
-    /// - empty normalized key phrases cause panic;
-    /// - duplicate normalized key phrases cause panic.
+    /// - empty key phrases cause panic;
+    /// - duplicate key phrases cause panic.
     ///
     /// The signature stays simple because the rest of the project already treats
     /// configuration loading as mandatory application startup work.
@@ -117,20 +136,19 @@ impl SubstitutionMap {
         for rule in substitution_toml.subs_vec {
 
             // Resolve the modifier once per rule.
-            // All key phrases of the rule share the same replacement and action.
-            let action = *action_map
-                .get(&rule.modifier)
-                .unwrap_or_else(|| panic!("in file `{}` unknown modifier: `{}`",
-                                          SUBSTITUTIONS_FILE_NAME,
-                                          rule.modifier));
+            // All key phrases of the rule share the same replacement/action/rollback.
+            let (action, rollback) = action_map
+                .get_pair(&rule.modifier)
+                .unwrap_or_else(|| panic!(
+                    "in file `{}` unknown modifier: `{}`",
+                    SUBSTITUTIONS_FILE_NAME,
+                    rule.modifier
+                ));
 
             for key_phrase in rule.key_phrases {
 
-                let normalized_key_phrase = Self::_normalize_key_phrase(&key_phrase);
-
-                // Empty phrases after normalization are forbidden.
-                // Example: "   " would collapse to an empty string.
-                if normalized_key_phrase.is_empty() {
+                // Empty literal key phrases are forbidden.
+                if key_phrase.is_empty() {
                     panic!(
                         "in file `{}` rule for replacement `{}` contains an empty key phrase.",
                         SUBSTITUTIONS_FILE_NAME,
@@ -138,12 +156,13 @@ impl SubstitutionMap {
                     );
                 }   // if
 
-                // Duplicate normalized keys are forbidden because they make lookup ambiguous.
+                // Duplicate keys are forbidden because they make lookup ambiguous.
                 let previous = map.insert(
-                    normalized_key_phrase.clone(),
+                    key_phrase.clone(),
                     SubstitutionElement {
                         _replacement_text: rule.replacement.clone(),
                         _action: action,
+                        _rollback: rollback,
                     },
                 );
 
@@ -151,7 +170,7 @@ impl SubstitutionMap {
                     panic!(
                         "in file `{}` duplicate key phrase: `{}`.",
                         SUBSTITUTIONS_FILE_NAME,
-                        normalized_key_phrase
+                        key_phrase
                     );
                 }   // if
 
@@ -171,13 +190,12 @@ impl SubstitutionMap {
     /// that the caller should keep accumulating input.
     ///
     /// # Parameters
-    /// - `query`: raw search phrase (will be normalized internally).
+    /// - `query`: raw search phrase, matched as-is.
     ///
     /// # Returns
     /// A `SubstitutionSearchResult` indicating the match outcome.
     pub(super) fn search(&self, query: &str) -> SubstitutionSearchResult<'_> {
-        let normalized_query = Self::_normalize_key_phrase(query);
-        self._search(&normalized_query, false)
+        self._search(query, false)
     }   // search()
 
     /// Performs a final search.
@@ -187,42 +205,22 @@ impl SubstitutionMap {
     /// In final mode, `ExactMatchWithContinuation` is promoted to `ExactMatch`.
     ///
     /// # Parameters
-    /// - `query`: raw search phrase (will be normalized internally).
+    /// - `query`: raw search phrase, matched as-is.
     ///
     /// # Returns
     /// A `SubstitutionSearchResult` indicating the match outcome.
     pub(super) fn final_search(&self, query: &str) -> SubstitutionSearchResult<'_> {
-        let normalized_query = Self::_normalize_key_phrase(query);
-        self._search(&normalized_query, true)
+        self._search(query, true)
     }   // final_search()
 
 }   // impl SubstitutionMap
 
 impl SubstitutionMap {
 
-    /// Converts a phrase to canonical lookup form.
-    ///
-    /// Normalization rules:
-    /// - trims leading and trailing whitespace;
-    /// - collapses internal whitespace to single spaces;
-    /// - lowercases the result.
-    ///
-    /// # Parameters
-    /// - `src`: raw input phrase.
-    ///
-    /// # Returns
-    /// Normalized string ready for dictionary lookup.
-    fn _normalize_key_phrase(src: &str) -> String {
-        src.split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
-    }   // _normalize_key_phrase()
-
     /// Internal search implementation shared by `search()` and `final_search()`.
     ///
     /// # Parameters
-    /// - `normalized_query`: already normalized query string.
+    /// - `query`: query string matched as-is.
     /// - `is_final`: if `true`, an exact match is accepted even when a longer
     ///   continuation exists in the dictionary.
     ///
@@ -238,20 +236,20 @@ impl SubstitutionMap {
     ///    - otherwise -> `ExactMatch`
     /// 3. No exact key, but some key starts with the query -> `PartialMatch`
     /// 4. Otherwise -> `NoMatch`
-    fn _search(&self, normalized_query: &str, is_final: bool) -> SubstitutionSearchResult<'_> {
+    fn _search(&self, query: &str, is_final: bool) -> SubstitutionSearchResult<'_> {
 
-        if normalized_query.is_empty() {
+        if query.is_empty() {
             return SubstitutionSearchResult::NoMatch;
         }   // if
 
         // Exact match has priority over partial match.
         // First determine whether the query is already a full key.
-        if let Some(element) = self._map.get(normalized_query) {
+        if let Some(element) = self._map.get(query) {
 
             // If a longer key begins with the same query, this exact match is still
             // ambiguous in streaming mode. The caller must wait unless the search
             // is explicitly marked as final.
-            if !is_final && self._has_continuation(normalized_query) {
+            if !is_final && self._has_continuation(query) {
                 return SubstitutionSearchResult::ExactMatchWithContinuation(element);
             }   // if
 
@@ -260,7 +258,7 @@ impl SubstitutionMap {
 
         // No exact match. Check whether the query is still a valid prefix
         // of at least one dictionary key.
-        if self._has_prefix_candidate(normalized_query) {
+        if self._has_prefix_candidate(query) {
             SubstitutionSearchResult::PartialMatch
         } else {
             SubstitutionSearchResult::NoMatch
@@ -271,45 +269,44 @@ impl SubstitutionMap {
     ///
     /// `BTreeMap` keeps keys in lexical order, so all keys sharing the same prefix
     /// form one contiguous region. It is enough to inspect the first key in the range
-    /// `[normalized_query, +inf)`.
+    /// `[query, +inf)`.
     ///
     /// # Parameters
-    /// - `normalized_query`: already normalized query string.
+    /// - `query`: query string matched as-is.
     ///
     /// # Returns
-    /// `true` if at least one key has `normalized_query` as a prefix.
-    fn _has_prefix_candidate(&self, normalized_query: &str) -> bool {
+    /// `true` if at least one key has `query` as a prefix.
+    fn _has_prefix_candidate(&self, query: &str) -> bool {
 
-        let mut range = self._map.range(normalized_query.to_string()..);
+        let mut range = self._map.range(query.to_string()..);
 
         match range.next() {
-            Some((key, _)) => key.starts_with(normalized_query),
+            Some((key, _)) => key.starts_with(query),
             None => false,
         }
     }   // _has_prefix_candidate()
 
     /// Checks whether the dictionary contains a key that is strictly longer
-    /// than `normalized_query` and starts with it.
+    /// than `query` and starts with it.
     ///
     /// Called only after an exact match has already been found.
     /// The search starts strictly after the exact key itself
     /// (using `Bound::Excluded`).
     ///
     /// # Parameters
-    /// - `normalized_query`: already normalized query string (known to be
-    ///   an existing key in the map).
+    /// - `query`: query string already known to exist in the map.
     ///
     /// # Returns
     /// `true` if a longer continuation key exists.
-    fn _has_continuation(&self, normalized_query: &str) -> bool {
+    fn _has_continuation(&self, query: &str) -> bool {
 
         let mut range = self._map.range((
-            Bound::Excluded(normalized_query.to_string()),
+            Bound::Excluded(query.to_string()),
             Bound::Unbounded,
         ));
 
         match range.next() {
-            Some((next_key, _)) => next_key.starts_with(normalized_query),
+            Some((next_key, _)) => next_key.starts_with(query),
             None => false,
         }
     }   // _has_continuation()
@@ -335,6 +332,7 @@ mod tests {
             SubstitutionElement {
                 _replacement_text: ".".to_string(),
                 _action: do_nothing,
+                _rollback: None,
             },
         );
 
@@ -343,6 +341,7 @@ mod tests {
             SubstitutionElement {
                 _replacement_text: ";".to_string(),
                 _action: do_nothing,
+                _rollback: None,
             },
         );
 
@@ -411,16 +410,13 @@ mod tests {
     }   // test_search_exact_unambiguous_match()
 
     #[test]
-    fn test_query_normalization_is_applied() {
+    fn test_query_is_matched_as_is() {
         let map = _make_test_map();
 
         match map.search("   ТОчка   С   Запятой   ") {
-            SubstitutionSearchResult::ExactMatch(element) => {
-                assert_eq!(element.replacement_text(), ";");
-            }
-
-            _ => panic!("Expected normalized ExactMatch"),
+            SubstitutionSearchResult::NoMatch => {}
+            _ => panic!("Expected NoMatch without normalization"),
         }   // match
-    }   // test_query_normalization_is_applied()
+    }   // test_query_is_matched_as_is()
 
 }   // mod tests

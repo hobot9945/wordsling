@@ -1,64 +1,210 @@
 //! surgical_table.rs — The surgical table for text processing.
 //!
 //! Manages the raw input from Gboard (`cutting_board`) and the processed
-//! output mirroring the Windows screen (`franken_board`). Handles erasures,
-//! stabilization anchors, and (in the future) text substitutions.
+//! output mirroring the Windows screen (`franken_board`).
 //!
-//! # RESPONSIBILITY
-//! - Store the raw and processed text as `Vec<char>` for safe character-level operations.
-//! - Enforce Gboard stabilization boundaries on erase commands.
-//! - Generate `ScreenTransfer` commands in response to incoming lexemes.
-//! - Maintain a mapping (`comb`) between raw and processed text for future substitutions.
+//! Текущая идея алгоритма:
+//!
+//! 1. Сначала автомат поиска решает, может ли лексема открыть кандидата.
+//! 2. Потом оценивается гипотетический кандидат:
+//!    уже накопленный хвост cutting_board + новая значимая лексема.
+//! 3. После этого принимается решение:
+//!    - писать сырой текст в обе доски;
+//!    - или писать сырой текст только в cutting_board,
+//!      а во franken_board выполнить eager replacement.
 
 use crate::core::lexeme_transfer::LexemeTransfer;
 use crate::core::screen_transfer::ScreenTransfer;
-use crate::core::text_processor::substitution_map::SubstitutionMap;
+use crate::core::text_processor::substitution_map::{
+    SubstitutionMap,
+    SubstitutionSearchResult,
+};
+use crate::core::text_processor::supplementary_action_map::{
+    SupplementaryAction,
+    SupplementaryRollback,
+    WhenApplied,
+};
 
 /// Maximum number of characters retained in the boards.
-/// Prevents unbounded growth during long dictation sessions
-/// without user activity resets.
 const _MAX_BOARD_CAPACITY: usize = 2000;
 
+/// Represents mapping between a segment in the cutting board
+/// and the corresponding segment in the franken board.
+#[derive(Default, Clone)]
+struct _Prong {
+    _cb_start: usize,
+    _cb_end: usize,
+    _fb_start: usize,
+    _fb_end: usize,
+    _rollback_fn: Option<SupplementaryRollback>,
+}   // _Prong
+
+/// Разные служебные флаги проекта.
+/// Пока не трогаю.
 #[derive(Default)]
-pub(super) struct Flags {
+pub(super) struct Flag {
     pub(super) dummy_flag: bool,
 }
 
-impl Flags {
+impl Flag {
     fn new() -> Self {
         Self::default()
     }
-}
 
-/// The surgical table manages the relationship between the raw Gboard input
-/// and the processed text that has been sent to the screen.
+    fn _clear(&mut self) {}
+}   // impl Flag
+
+// =============================================================================
+// Search FSM
+// =============================================================================
+
+/// Семантический статус уже открытого кандидата.
 ///
-/// `cutting_board` holds the raw stream from Gboard (after lexer decapitalization).
-/// `franken_board` mirrors what the focused Windows input field should contain.
-/// Currently, these two boards are identical (no substitutions implemented yet).
+/// `_Partial`
+///     Кандидат растет, но точного совпадения пока не было.
+///
+/// `_ExactReady`
+///     Точное совпадение уже было найдено и полностью применено:
+///     `action(Before) -> replacement -> action(After)`.
+///
+///     Но оно еще не зафиксировано окончательно в гребенке,
+///     потому что словарь допускает более длинное продолжение.
+///
+/// Если позже короткий exact будет перебит более длинным ключом,
+/// эта ранняя подстановка должна быть честно откачена через:
+/// `rollback(Before) -> restore raw text -> rollback(After)`.
+#[derive(Clone)]
+enum _CandidateStatus {
+    _Partial,
+    _ExactReady
+}   // _CandidateStatus
+
+/// Живой кандидат, который сейчас растет.
+#[derive(Clone)]
+struct _Candidate {
+    /// `_prong._cb_start` / `_prong._fb_start`
+    ///     начало всего растущего кандидата.
+    ///
+    /// `_prong._cb_end` / `_prong._fb_end`
+    ///     границы последнего "готового" точного совпадения внутри кандидата,
+    ///     если кандидат когда-либо входил в `_ExactReady`.
+    _prong: _Prong,
+
+    /// Текущий статус роста кандидата.
+    _status: _CandidateStatus,
+}   // _Candidate
+
+/// Автомат поиска фразового ключа.
+///
+/// `_Idle`
+///     Сейчас никакой ключ не отслеживается.
+///
+/// `_VacancyOpen`
+///     Пришла лексема `WordStart`.
+///     Следующий первый `WordPart` имеет право стать кандидатом на начало
+///     заменяемого текста.
+///
+///     Пунктуация в это состояние не нуждается:
+///     она может открыть кандидата напрямую из `_Idle`.
+///
+/// `_CandidateGrowing`
+///     Кандидат уже принят в рост.
+///     На каждой значимой лексеме его гипотетическая строка перепроверяется
+///     в словаре.
+enum _CandidatePosition {
+    _None,
+    _VacancyOpen,
+    _CandidateGrowing(_Candidate),
+}   // _CandidatePosition
+
+impl Default for _CandidatePosition {
+    fn default() -> Self {
+        Self::_None
+    }
+}   // impl Default for _CandidatePosition
+
+/// Решение словарного слоя, отвязанное от заимствований из `SubstitutionMap`.
+enum _SearchDecision {
+    _NoMatch,
+    _Partial,
+    _ExactReady {
+        _replacement_text: String,
+        _action: SupplementaryAction,
+        _rollback_fn: Option<SupplementaryRollback>,
+    },
+    _ApplyNow {
+        _replacement_text: String,
+        _action: SupplementaryAction,
+        _rollback_fn: Option<SupplementaryRollback>,
+    },
+}   // _SearchDecision
+
+impl _SearchDecision {
+
+    /// Строит безопасное решение поиска без удержания borrow на словаре.
+    fn _make_decision(subst_map: &SubstitutionMap, query: &str, is_final: bool) -> Self {
+        let search_result = if is_final {
+            subst_map.final_search(query)
+        } else {
+            subst_map.search(query)
+        };
+
+        match search_result {
+            SubstitutionSearchResult::NoMatch => {
+                _SearchDecision::_NoMatch
+            }
+
+            SubstitutionSearchResult::PartialMatch => {
+                _SearchDecision::_Partial
+            }
+
+            SubstitutionSearchResult::ExactMatch(element) => {
+                _SearchDecision::_ApplyNow {
+                    _replacement_text: element.replacement_text().to_string(),
+                    _action: element.action(),
+                    _rollback_fn: element.rollback(),
+                }
+            }
+
+            SubstitutionSearchResult::ExactMatchWithContinuation(element) => {
+                _SearchDecision::_ExactReady {
+                    _replacement_text: element.replacement_text().to_string(),
+                    _action: element.action(),
+                    _rollback_fn: element.rollback(),
+                }
+            }
+        }
+    }   // _make_decision()
+
+}   // impl _SearchDecision
+
+// =============================================================================
+// Main table
+// =============================================================================
+
 pub(super) struct SurgeTable {
-    /// Raw text received from Gboard (via lexer).
+    /// Raw text received from Gboard.
     _cutting_board: Vec<char>,
 
     /// Processed text mirroring the screen content.
     _franken_board: Vec<char>,
 
-    /// Index mapping for substitutions. A prong marks the boundaries
-    /// of a replaced segment in both boards. Only exists in the unstable
-    /// region; cleared on stabilization. Currently unused.
+    /// Активные зубцы в нестабильной зоне.
+    /// Здесь лежат только уже состоявшиеся подстановки.
     _comb: Vec<_Prong>,
 
+    /// Текущее состояние автомата поиска фразового ключа.
+    _candidate_position: _CandidatePosition,
 
-    pub(super) flags: Flags,
+    pub(super) flag: Flag,
 
-    /// Gboard stabilization anchor (character index in `_cutting_board`).
-    /// Gboard erase commands cannot delete text before this point.
+    /// Gboard stabilization anchor in `_cutting_board`.
     _stabilization_anchor: usize,
 
-    _substitution: SubstitutionMap,
-    
+    _subst_map: SubstitutionMap,
+
     /// Internal queue of screen commands awaiting dispatch.
-    _pending_transfers: Vec<ScreenTransfer>,
+    _screen_transfer_vec: Vec<ScreenTransfer>,
 }   // SurgeTable
 
 impl SurgeTable {
@@ -69,89 +215,609 @@ impl SurgeTable {
             _cutting_board: Vec::new(),
             _franken_board: Vec::new(),
             _comb: Vec::new(),
-            flags: Flags::new(),
+            _candidate_position: _CandidatePosition::_None,
+            flag: Flag::new(),
             _stabilization_anchor: 0,
-            _substitution: SubstitutionMap::new(),
-            _pending_transfers: Vec::new(),
+            _subst_map: SubstitutionMap::new(),
+            _screen_transfer_vec: Vec::new(),
         }
     }   // new()
 
+}   // impl SurgeTable
+
+impl SurgeTable {
+
     /// Processes a single incoming lexeme.
     ///
-    /// Updates internal boards and generates screen transfer commands
-    /// as needed. The caller must retrieve generated commands via
-    /// `pop_screen_transfers()` after each call.
+    /// Алгоритм разбит на 3 фазы:
+    ///
+    /// 1. pre-phase
+    ///    Обновляем FSM поиска ДО записи новой лексемы в доски.
+    ///
+    /// 2. predictive phase
+    ///    Если лексема значимая, ищем гипотетического кандидата в карте замен:
+    ///    текущий хвост кандидата + новая лексема.
+    ///
+    /// 3. apply phase
+    ///    После оценки принимаем квалифицированное решение, что писать:
+    ///    - сырой текст в обе доски,
+    ///    - или сырой текст только в cutting_board, а во franken_board
+    ///      уже замену.
     pub(super) fn process_lexeme(&mut self, lexeme: &LexemeTransfer) {
-        
-        match lexeme {
+        self._preprocess_employing_candidate(lexeme);
 
-            LexemeTransfer::WordPart(text) => {
-                self._push_text(text);
+        if let Some(text_lexeme) = Self::_extract_significant_text(lexeme) {
+            self._process_text_lexeme(&text_lexeme);
+        } else {
+            self._process_service_lexeme(lexeme);
+        }
+    }   // process_lexeme()
+
+    /// Extracts all accumulated screen transfers and clears the internal queue.
+    pub(super) fn pop_screen_transfers(&mut self) -> Vec<ScreenTransfer> {
+        std::mem::take(&mut self._screen_transfer_vec)
+    }   // pop_screen_transfers()
+
+    /// Извлекает значимый текст лексемы.
+    ///
+    /// Для:
+    /// - `WordPart`
+    /// - `Whitespace`
+    /// - `Punctuation`
+    ///
+    /// Возвращает строку, которую эта лексема добавляет в поток.
+    fn _extract_significant_text(lexeme: &LexemeTransfer) -> Option<String> {
+        match lexeme {
+            LexemeTransfer::WordPart(text) => Some(text.clone()),
+            LexemeTransfer::Whitespace(c) | LexemeTransfer::Punctuation(c) => {
+                Some(c.to_string())
             }
 
-            LexemeTransfer::Whitespace(c) | LexemeTransfer::Punctuation(c) => {
-                self._push_char(*c);
+            LexemeTransfer::WordStart
+            | LexemeTransfer::WordEnd
+            | LexemeTransfer::EraseStart
+            | LexemeTransfer::BackspaceCount(_)
+            | LexemeTransfer::EraseEnd
+            | LexemeTransfer::Stabilization
+            | LexemeTransfer::UserActivityDetected => {
+                None
+            }
+        }
+    }   // _extract_significant_text()
+}   // impl SurgeTable
+
+// =============================================================================
+// Phase 1: preprocess FSM
+// =============================================================================
+
+impl SurgeTable {
+
+    /// Подготовительный этап перед обработкой лексемы.
+    ///
+    /// Здесь мы решаем только одно:
+    /// может ли лексема открыть нового кандидата.
+    fn _preprocess_employing_candidate(&mut self, lexeme: &LexemeTransfer) {
+
+        match lexeme {
+
+            LexemeTransfer::WordStart => {
+                // Открываем вакансию:
+                // следующий первый WordPart может стать началом кандидата.
+                if matches!(self._candidate_position, _CandidatePosition::_None) {
+                    self._candidate_position = _CandidatePosition::_VacancyOpen;
+                }
+            }
+
+            LexemeTransfer::WordPart(_) => {
+                // Первый WordPart после WordStart создает кандидата.
+                // Сам по себе WordPart не должен стартовать кандидата из _Idle,
+                // иначе можно случайно начать нового кандидата с середины уже растущего слова,
+                // разбитого транспортом на несколько кусков.
+                if matches!(self._candidate_position, _CandidatePosition::_VacancyOpen) {
+                    self._candidate_position = self._new_candidate();
+                }
+            }
+
+            LexemeTransfer::Punctuation(_) => {
+                // Пунктуация может сама по себе быть началом ключа.
+                // Поэтому она имеет право открыть кандидата не только из _VacancyOpen,
+                // но и напрямую из _Idle.
+                //
+                // Если кандидат уже растет, ничего не делаем: новая пунктуация будет
+                // обработана как продолжение текущего кандидата на следующей стадии.
+                if matches!(
+                    self._candidate_position,
+                    _CandidatePosition::_None | _CandidatePosition::_VacancyOpen
+                ) {
+                    self._candidate_position = self._new_candidate();
+                }
+            }
+
+            LexemeTransfer::Whitespace(_) => {
+                // Пробел сам по себе нового кандидата не открывает.
+                // Если "вакансия" висела, но слово так и не началось — гасим ее.
+                if matches!(self._candidate_position, _CandidatePosition::_VacancyOpen) {
+                    self._candidate_position = _CandidatePosition::_None;
+                }
+            }
+
+            LexemeTransfer::BackspaceCount(_)
+            | LexemeTransfer::Stabilization
+            | LexemeTransfer::WordEnd
+            | LexemeTransfer::UserActivityDetected
+            | LexemeTransfer::EraseStart
+            | LexemeTransfer::EraseEnd => {
+                // No-op
+            }
+
+        }   // match
+    }   // _preprocess_search_state()
+
+    /// Создает нового растущего кандидата, начиная с текущего хвоста обеих досок.
+    fn _new_candidate(&mut self) -> _CandidatePosition {
+        _CandidatePosition::_CandidateGrowing(_Candidate {
+            _prong: _Prong {
+                _cb_start: self._cutting_board.len(),
+                _cb_end: 0,
+                _fb_start: self._franken_board.len(),
+                _fb_end: 0,
+                _rollback_fn: None,
+            },
+            _status: _CandidateStatus::_Partial,
+        })
+    }   // _new_candidate
+
+}   // impl SurgeTable
+
+// =============================================================================
+// Phase 2 + 3: predictive evaluation and apply
+// =============================================================================
+
+impl SurgeTable {
+
+    /// Обрабатывает значимую текстовую лексему по новому алгоритму.
+    ///
+    /// Ключевая разница с прежней схемой:
+    /// мы НЕ пишем лексему заранее в обе доски.
+    /// Сначала оцениваем гипотетический кандидат,
+    /// и только потом решаем, как именно записывать.
+    fn _process_text_lexeme(&mut self, lexeme_text: &str) {
+
+        // Вынимаем FSM из self, чтобы можно было свободно мутировать self дальше. take() выполняет
+        // self._candidate_position = _CandidatePosition::default().
+        let candidate_position = std::mem::take(&mut self._candidate_position);
+
+        // Принять текст новой лексемы.
+        match candidate_position {
+
+            // Тривиальная часть. Кандидат не был образован, новый текст просто пишем в обе доски.
+            _CandidatePosition::_None | _CandidatePosition::_VacancyOpen => {
+                // _None - кандидата не было, то есть нет истории. Пишем новый текст в обе доски,
+                // генерируем текст для передачи на экран.
+                // _VacancyOpen - после preprocess для текстовой лексемы сюда попасть не должны.
+                // То есть, готовы были принять кандидата, и пришел текст, чтобы им стать, но,
+                // почему-то не стал. На всякий случай, обеспечим безопасное поведение.
+                self._write_raw_text_to_both_boards(lexeme_text);
+                self._candidate_position = _CandidatePosition::_None;
+            }
+
+            // Содержательная часть. Кандидат образован, пусть, даже пустой.
+            _CandidatePosition::_CandidateGrowing(candidate) => {
+                // Плюсуем новую лексему к тексту кандидата.
+                let candidate_new_text =
+                    self._build_candidate_string_new_text_included(&candidate._prong, lexeme_text);
+
+                // Сверяем новый текст с картой подстановок, генерируем решение.
+                let decision =
+                    _SearchDecision::_make_decision(&self._subst_map, &candidate_new_text, false);
+
+                // Применяем решение.
+                self._candidate_position = self._apply_decision(candidate, lexeme_text, decision);
+            }
+        }   // match
+    }   // _process_text_lexeme()
+
+    /// Применяет решение, принятое по гипотетическому кандидату. Когда функция вызывается, кандидат
+    /// всегда есть (_CandidateGrowing), его статус либо _Partial, либо _ExactReady.
+    fn _apply_decision(
+        &mut self,
+        mut candidate: _Candidate,
+        new_lexeme_text: &str,
+        decision: _SearchDecision)
+        -> _CandidatePosition
+    {
+        // Кандидат есть (CandidatePosition::_CandidateGrowing), его статус либо _Partial, даже если
+        // он пустой (только образован), либо _ExactReady.
+        match decision {
+
+            // Кандидата либо принимают в партию, либо расстреливают.
+            _SearchDecision::_NoMatch => {
+                // Новая лексема либо дисквалифицирует _Partial кандидата, либо завершает _ExactReady.
+                //
+                // Текущее поведение:
+                // - пишем новую лексему сырьем в обе доски;
+                // - если ранее уже был eager exact, принимаем кандидата в партию имени Франкенштейна,
+                // то есть фиксируем его зубец в гребне;
+                self._write_raw_text_to_both_boards(new_lexeme_text);
+
+                if matches!(candidate._status, _CandidateStatus::_ExactReady) {
+                    // Кандидат становится подстановкой, освобождая место кандидата.
+                    self._commit_exact_ready_candidate(candidate);
+                    _CandidatePosition::_None
+                } else {
+                    // Кандидат не оправдал доверия и приговорен к расстрелу.
+                    _CandidatePosition::_None
+                }
+            }
+
+            // Кандидата либо оставляют пока в живых, либо, если он уже принят в партию в качестве
+            // исполняющего обязанности, намекают на возможность повышения (совпал с коротким вариантом
+            // фразового ключа, выполнил подстановку, но еще может дорасти до более длинного варианта).
+            _SearchDecision::_Partial => {
+                // Кандидат еще может расти. Новая лексема пока не вызывает замену, поэтому просто пишем
+                // ее сырьем в обе доски.
+                //
+                // Если у кандидата уже был статус ExactReady, подстановка уже выполнена, но его зубец
+                // еще не переехал в гребень. Статус сохраняется. Кандидат еще может утвердиться как
+                // подстановка, если не случится более длинное совпадение. Оставляем его в ожидании.
+                self._write_raw_text_to_both_boards(new_lexeme_text);
+                _CandidatePosition::_CandidateGrowing(candidate)
+            }
+
+            // Кандидата либо принимают в партию в качестве исполняющего обязанности, либо продвигают
+            // выше. Но, оставляют исполняющим, намекая на возможность дальнейшего роста.
+            _SearchDecision::_ExactReady {
+                _replacement_text,
+                _action,
+                _rollback_fn,
+            } => {
+                // Если короткий eager exact уже висит на экране,
+                // сначала честно откатываем его обратно к сырому виду кандидата.
+                if matches!(candidate._status, _CandidateStatus::_ExactReady) {
+                    self._undo_exact_ready(&mut candidate);
+                }
+
+                // Новый сырой текст принимается только в cutting_board.
+                self._write_raw_text_to_cutting_board(new_lexeme_text);
+
+                // Поверх актуального кандидата применяем новый eager exact.
+                self._materialize_exact_candidate(
+                    &mut candidate,
+                    &_replacement_text,
+                    _action,
+                    _rollback_fn,
+                );
+
+                candidate._status = _CandidateStatus::_ExactReady;
+
+                _CandidatePosition::_CandidateGrowing(candidate)
+            }
+
+            _SearchDecision::_ApplyNow {
+                _replacement_text,
+                _action,
+                _rollback_fn,
+            } => {
+                // Если ранее висел eager exact, сначала откатываем его.
+                if matches!(candidate._status, _CandidateStatus::_ExactReady) {
+                    self._undo_exact_ready(&mut candidate);
+                }
+
+                // Новый сырой текст принимается только в cutting_board.
+                self._write_raw_text_to_cutting_board(new_lexeme_text);
+
+                // Выполняем окончательную exact-подстановку и сразу
+                // фиксируем зубец в гребне.
+                self._materialize_exact_candidate(
+                    &mut candidate,
+                    &_replacement_text,
+                    _action,
+                    _rollback_fn,
+                );
+
+                self._comb.push(candidate._prong);
+
+                _CandidatePosition::_None
+            }
+        }   // match
+    }   // _apply_text_decision()
+}   // impl SurgeTable
+
+// =============================================================================
+// Service lexemes
+// =============================================================================
+
+impl SurgeTable {
+
+    /// Обрабатывает нетекстовые лексемы.
+    fn _process_service_lexeme(&mut self, lexeme: &LexemeTransfer) {
+        match lexeme {
+
+            LexemeTransfer::Stabilization => {
+                self._finalize_candidate_on_stabilization();
+                self._mark_gboard_stabilization();
+                self._candidate_position = _CandidatePosition::_None;
             }
 
             LexemeTransfer::BackspaceCount(n) => {
                 self._apply_gboard_erase(*n as usize);
-            }
 
-            LexemeTransfer::Stabilization => {
-                self._mark_gboard_stabilization();
+                // Пока консервативно считаем, что после внешнего erase
+                // поисковый контекст потерян.
+                //
+                // ВАЖНО:
+                // этот участок по-прежнему временный.
+                // После внедрения eager replacement прямолинейный erase
+                // еще сильнее требует отдельной доработки под:
+                // - живой кандидат,
+                // - exact-ready кандидат,
+                // - comb rollback.
+                self._candidate_position = _CandidatePosition::_None;
             }
 
             LexemeTransfer::UserActivityDetected => {
                 self._clear_all();
             }
 
-            // Non-significant lexemes: silently consumed.
+            LexemeTransfer::WordEnd => {
+                // Закрываем "вакансию", если слово так и не началось.
+                if matches!(self._candidate_position, _CandidatePosition::_VacancyOpen) {
+                    self._candidate_position = _CandidatePosition::_None;
+                }
+
+                // TODO:
+                // Здесь позже можно будет добавить boundary-aware проверку.
+                //
+                // Сейчас `SubstitutionMap` умеет только обычный prefix search
+                // и final_search(), но не умеет учитывать класс продолжения:
+                // - внутри того же слова
+                // - через пробел
+                // - через пунктуацию
+            }
+
             LexemeTransfer::WordStart
-            | LexemeTransfer::WordEnd
             | LexemeTransfer::EraseStart
-            | LexemeTransfer::EraseEnd => {}
+            | LexemeTransfer::EraseEnd => {
+                // Эти лексемы уже отработали на pre-phase
+                // или не требуют отдельной сервисной обработки.
+            }
+
+            LexemeTransfer::WordPart(_)
+            | LexemeTransfer::Whitespace(_)
+            | LexemeTransfer::Punctuation(_) => {
+                // Сюда попадать не должны:
+                // они обрабатываются через _process_text_lexeme().
+            }
 
         }   // match
-    }   // process_lexeme()
+    }   // _process_service_lexeme()
 
-    /// Extracts all accumulated screen transfers and clears the internal queue.
-    pub(super) fn pop_screen_transfers(&mut self) -> Vec<ScreenTransfer> {
-        std::mem::take(&mut self._pending_transfers)
-    }   // pop_screen_transfers()
+    /// Финализирует живого кандидата при стабилизации потока.
+    ///
+    /// Здесь новая лексема уже не прибавляется.
+    /// Мы оцениваем текущий накопленный кандидат "как есть".
+    fn _finalize_candidate_on_stabilization(&mut self) {
 
-    /// Appends a text fragment to both boards and enqueues a screen command.
-    fn _push_text(&mut self, text: &str) {
+        let search_state = std::mem::take(&mut self._candidate_position);
+
+        let _CandidatePosition::_CandidateGrowing(candidate) = search_state else {
+            return;
+        };
+
+        let candidate_string = self._get_candidate_string(&candidate._prong);
+        let decision = _SearchDecision::_make_decision(&self._subst_map, &candidate_string, true);
+
+        match decision {
+
+            _SearchDecision::_ApplyNow {
+                _replacement_text,
+                _action,
+                _rollback_fn,
+            } => {
+                // Финальная подстановка на уже собранном кандидате.
+                let mut candidate = candidate;
+
+                if matches!(candidate._status, _CandidateStatus::_ExactReady) {
+                    self._undo_exact_ready(&mut candidate);
+                }
+
+                self._materialize_exact_candidate(
+                    &mut candidate,
+                    &_replacement_text,
+                    _action,
+                    _rollback_fn,
+                );
+
+                self._comb.push(candidate._prong);
+            }
+
+            _SearchDecision::_ExactReady { .. } => {
+                // Для final_search() такого быть не должно.
+                unreachable!("final_search() must not return _ExactReady");
+            }
+
+            _SearchDecision::_Partial | _SearchDecision::_NoMatch => {
+                // Полный текущий кандидат не собрался в окончательный exact.
+                // Если внутри него ранее уже было краткое ExactReady,
+                // считаем его состоявшимся.
+                if matches!(candidate._status, _CandidateStatus::_ExactReady) {
+                    self._commit_exact_ready_candidate(candidate);
+                }
+            }
+
+        }   // match
+    }   // _finalize_candidate_on_stabilization()
+
+}   // impl SurgeTable
+
+// =============================================================================
+// Candidate helpers
+// =============================================================================
+
+impl SurgeTable {
+
+    /// Извлекает текущую строку кандидата из cutting_board.
+    fn _get_candidate_string(&self, prong: &_Prong) -> String {
+        self._cutting_board[prong._cb_start..]
+            .iter()
+            .collect::<String>()
+    }   // _get_candidate_string()
+
+    /// Строит гипотетическую строку кандидата:
+    /// текущий хвост cutting_board + новая значимая лексема.
+    fn _build_candidate_string_new_text_included(&self, prong: &_Prong, text: &str) -> String {
+        let mut out = self._get_candidate_string(prong);
+        out.push_str(text);
+        out
+    }   // _build_candidate_string_new_text_included()
+
+    /// Фиксирует ранее найденный eager exact как полноценный зубец.
+    fn _commit_exact_ready_candidate(&mut self, candidate: _Candidate) {
+        if matches!(candidate._status, _CandidateStatus::_ExactReady) {
+            self._comb.push(candidate._prong);
+        }
+    }   // _commit_exact_ready_candidate()
+
+    /// Выполняет exact-подстановку над текущим кандидатом и
+    /// обновляет его зубец.
+    ///
+    /// Предполагается, что:
+    /// - предыдущий eager exact (если был) уже откатан;
+    /// - новый сырой текст текущей лексемы (если он есть) уже принят в cutting_board.
+    fn _materialize_exact_candidate(
+        &mut self,
+        candidate: &mut _Candidate,
+        replacement_text: &str,
+        action: SupplementaryAction,
+        rollback_fn: Option<SupplementaryRollback>,
+    ) {
+        action(self, WhenApplied::Before);
+
+        self._replace_candidate_tail_in_franken_board(
+            candidate._prong._fb_start,
+            replacement_text,
+        );
+
+        action(self, WhenApplied::After);
+
+        candidate._prong._cb_end = self._cutting_board.len();
+        candidate._prong._fb_end = self._franken_board.len();
+        candidate._prong._rollback_fn = rollback_fn;
+    }   // _materialize_exact_candidate()
+
+    /// Откатывает состоявшуюся раннюю подстановку по всем правилам:
+    /// вызов rollback(Before) -> восстановление сырого текста -> вызов rollback(After).
+    fn _undo_exact_ready(&mut self, candidate: &mut _Candidate) {
+        if matches!(candidate._status, _CandidateStatus::_ExactReady) {
+
+            if let Some(rb) = candidate._prong._rollback_fn {
+                rb(self, WhenApplied::Before);
+            }
+
+            // Замена текста на сырой текст из разделочной доски
+            let raw_tail_len = self._franken_board.len() - candidate._prong._fb_start;
+            if raw_tail_len > 0 {
+                self._franken_board.truncate(candidate._prong._fb_start);
+                self._screen_transfer_vec.push(ScreenTransfer::Backspace(raw_tail_len));
+            }
+
+            let original_raw_text: String = self._cutting_board[candidate._prong._cb_start..].iter().collect();
+            if !original_raw_text.is_empty() {
+                self._franken_board.extend(original_raw_text.chars());
+                self._screen_transfer_vec.push(ScreenTransfer::Text(original_raw_text));
+            }
+
+            if let Some(rb) = candidate._prong._rollback_fn {
+                rb(self, WhenApplied::After);
+            }
+        }
+    }   // _undo_exact_ready()
+}   // impl SurgeTable
+
+// =============================================================================
+// Low-level board operations
+// =============================================================================
+
+impl SurgeTable {
+
+    /// Пишет сырой текст сразу в обе доски.
+    fn _write_raw_text_to_both_boards(&mut self, text: &str) {
+        self._write_raw_text_to_cutting_board(text);
+        self._write_raw_text_to_franken_board(text);
+    }   // _write_raw_text_to_both_boards()
+
+    /// Пишет сырой текст в cutting_board.
+    fn _write_raw_text_to_cutting_board(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
         let chars: Vec<char> = text.chars().collect();
         self._cutting_board.extend_from_slice(&chars);
-        self._franken_board.extend_from_slice(&chars);
-        self._pending_transfers.push(ScreenTransfer::Text(text.to_string()));
         self._prune_if_needed();
-    }   // _push_text()
+    }   // _write_raw_text_to_cutting_board()
 
-    /// Appends a single character to both boards and enqueues a screen command.
-    fn _push_char(&mut self, c: char) {
-        self._cutting_board.push(c);
-        self._franken_board.push(c);
-        self._pending_transfers.push(ScreenTransfer::Text(c.to_string()));
+    /// Пишет сырой текст во franken_board и генерирует экранную передачу.
+    fn _write_raw_text_to_franken_board(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+        self._franken_board.extend_from_slice(&chars);
+        self._screen_transfer_vec
+            .push(ScreenTransfer::Text(text.to_string()));
         self._prune_if_needed();
-    }   // _push_char()
+    }   // _write_raw_text_to_franken_board()
+
+    /// Заменяет весь текущий franken-tail кандидата replacement-ом.
+    ///
+    /// Важный нюанс:
+    /// новая лексема здесь еще НЕ была записана во franken_board.
+    /// Поэтому мы стираем только уже существующий хвост кандидата.
+    fn _replace_candidate_tail_in_franken_board(&mut self, fb_start: usize,
+                                                replacement_text: &str)
+    {
+        let raw_tail_len = self._franken_board.len() - fb_start;
+
+        if raw_tail_len > 0 {
+            self._franken_board.truncate(fb_start);
+            self._screen_transfer_vec
+                .push(ScreenTransfer::Backspace(raw_tail_len));
+        }
+
+        if !replacement_text.is_empty() {
+            self._franken_board.extend(replacement_text.chars());
+            self._screen_transfer_vec
+                .push(ScreenTransfer::Text(replacement_text.to_string()));
+        }
+    }   // _replace_candidate_tail_in_franken_board()
+
+}   // impl SurgeTable
+
+// =============================================================================
+// Misc state management
+// =============================================================================
+
+impl SurgeTable {
 
     /// Applies an erase command from Gboard.
     ///
-    /// Respects the Gboard stabilization anchor: erase cannot
-    /// delete characters before `_stabilization_anchor`.
-    /// Uses the `_franken_board` to determine how many screen
-    /// backspaces to emit (currently 1:1 with cutting_board).
+    /// ВНИМАНИЕ:
+    /// это по-прежнему временный прямолинейный вариант.
+    ///
+    /// Он не умеет корректно работать с:
+    /// - eager replacement в живом кандидате;
+    /// - rollback-ом уже зафиксированных зубцов;
+    /// - частичным разрушением replacement-а.
+    ///
+    /// Но пока оставляю его как отдельный слой следующей доработки,
+    /// а не мешаю сюда в один ком.
     fn _apply_gboard_erase(&mut self, n: usize) {
         let current_len = self._cutting_board.len();
 
-        // How far back Gboard wants to go.
         let target_len = current_len.saturating_sub(n);
-
-        // Clamp to the stabilization anchor.
         let target_len = target_len.max(self._stabilization_anchor);
-
-        // Actual number of characters to erase.
         let actual_erase = current_len - target_len;
 
         if actual_erase == 0 {
@@ -161,61 +827,41 @@ impl SurgeTable {
         self._cutting_board.truncate(target_len);
         self._franken_board.truncate(target_len);
 
-        // Remove any comb prongs that fall beyond the new length.
         self._trim_comb(target_len);
 
-        self._pending_transfers.push(ScreenTransfer::Backspace(actual_erase));
+        self._screen_transfer_vec
+            .push(ScreenTransfer::Backspace(actual_erase));
     }   // _apply_gboard_erase()
 
     /// Records a Gboard stabilization event.
-    ///
-    /// Moves the anchor to the current end of the cutting board.
-    /// Clears all comb prongs (they only exist in the unstable region).
     fn _mark_gboard_stabilization(&mut self) {
         self._stabilization_anchor = self._cutting_board.len();
         self._comb.clear();
     }   // _mark_gboard_stabilization()
 
-    /// Clears all state. Called when user activity is detected
-    /// (mouse click, keyboard input on the host), meaning the cursor
-    /// position is no longer known and the franken_board no longer
-    /// reflects the screen content.
+    /// Clears all state.
     fn _clear_all(&mut self) {
         self._cutting_board.clear();
         self._franken_board.clear();
         self._comb.clear();
         self._stabilization_anchor = 0;
+        self.flag._clear();
+        self._candidate_position = _CandidatePosition::_None;
     }   // _clear_all()
 
-    /// Removes comb prongs that reference positions beyond `new_len`.
-    ///
-    /// Stub: currently the comb is always empty (no substitutions).
     fn _trim_comb(&mut self, _new_len: usize) {
-        // Will be implemented when substitutions are added.
-        // For now, the comb is always empty.
+        // TODO: implement prong-aware trim.
     }   // _trim_comb()
 
-    /// Trims the oldest portion of the boards when they exceed
-    /// `_MAX_BOARD_CAPACITY`. Adjusts the anchor and comb accordingly.
-    ///
-    /// Stub: will be implemented when needed.
     fn _prune_if_needed(&mut self) {
         // TODO: implement sliding window pruning.
+        let _ = _MAX_BOARD_CAPACITY;
     }   // _prune_if_needed()
 
 }   // impl SurgeTable
 
 impl Drop for SurgeTable {
     fn drop(&mut self) {
-        // Cleanup logic if needed in the future.
+        // future cleanup
     }   // drop()
 }   // impl Drop for SurgeTable
-
-/// Represents an index mapping between a segment in the cutting board
-/// and the corresponding segment in the franken board.
-/// Used exclusively for text substitutions (future feature).
-#[derive(Default)]
-struct _Prong {
-    _cboard_ind: usize,
-    _fboard_ind: usize,
-}   // _Prong
