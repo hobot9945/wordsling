@@ -13,6 +13,7 @@
 //!    - или писать сырой текст только в cutting_board,
 //!      а во franken_board выполнить eager replacement.
 
+use hobolib::prln;
 use crate::core::lexeme_transfer::LexemeTransfer;
 use crate::core::screen_transfer::ScreenTransfer;
 use crate::core::text_processor::substitution_map::{
@@ -198,9 +199,7 @@ pub(super) struct SurgeTable {
 
     pub(super) flag: Flag,
 
-    /// Gboard stabilization anchor in `_cutting_board`.
-    _stabilization_anchor: usize,
-
+    /// Карта подстановок.
     _subst_map: SubstitutionMap,
 
     /// Internal queue of screen commands awaiting dispatch.
@@ -217,7 +216,6 @@ impl SurgeTable {
             _comb: Vec::new(),
             _candidate_position: _CandidatePosition::_None,
             flag: Flag::new(),
-            _stabilization_anchor: 0,
             _subst_map: SubstitutionMap::new(),
             _screen_transfer_vec: Vec::new(),
         }
@@ -471,25 +469,19 @@ impl SurgeTable {
                 _action,
                 _rollback_fn,
             } => {
-                // Если короткий eager exact уже висит на экране,
-                // сначала честно откатываем его обратно к сырому виду кандидата.
-                if matches!(candidate._status, _CandidateStatus::_ExactReady) {
-                    self._undo_exact_ready(&mut candidate);
-                }
-
                 // Новый сырой текст принимается только в cutting_board.
                 self._write_raw_text_to_cutting_board(new_lexeme_text);
 
-                // Поверх актуального кандидата применяем новый eager exact.
-                self._materialize_exact_candidate(
+                // Поверх актуального кандидата применяем новый eager exact. Гребень не затрагивается.
+                self._apply_substitution_for_candidate(
                     &mut candidate,
                     &_replacement_text,
                     _action,
                     _rollback_fn,
                 );
 
+                // Установить новое состояние.
                 candidate._status = _CandidateStatus::_ExactReady;
-
                 _CandidatePosition::_CandidateGrowing(candidate)
             }
 
@@ -498,25 +490,21 @@ impl SurgeTable {
                 _action,
                 _rollback_fn,
             } => {
-                // Если ранее висел eager exact, сначала откатываем его.
-                if matches!(candidate._status, _CandidateStatus::_ExactReady) {
-                    self._undo_exact_ready(&mut candidate);
-                }
-
                 // Новый сырой текст принимается только в cutting_board.
                 self._write_raw_text_to_cutting_board(new_lexeme_text);
 
-                // Выполняем окончательную exact-подстановку и сразу
-                // фиксируем зубец в гребне.
-                self._materialize_exact_candidate(
+                // Выполняем окончательную exact-подстановку.
+                self._apply_substitution_for_candidate(
                     &mut candidate,
                     &_replacement_text,
                     _action,
                     _rollback_fn,
                 );
 
+                // Фиксируем зубец в гребне.
                 self._comb.push(candidate._prong);
 
+                // Освобождаем место для нового кандидата.
                 _CandidatePosition::_None
             }
         }   // match
@@ -556,7 +544,11 @@ impl SurgeTable {
             }
 
             LexemeTransfer::UserActivityDetected => {
+                // Активность мыши или клавиатуры - это вынужденная стабилизация, то есть финализация
+                // кандидата, а потом очистка всего.
+                self._finalize_candidate_on_stabilization();
                 self._clear_all();
+                self._candidate_position = _CandidatePosition::_None;
             }
 
             LexemeTransfer::WordEnd => {
@@ -564,15 +556,6 @@ impl SurgeTable {
                 if matches!(self._candidate_position, _CandidatePosition::_VacancyOpen) {
                     self._candidate_position = _CandidatePosition::_None;
                 }
-
-                // TODO:
-                // Здесь позже можно будет добавить boundary-aware проверку.
-                //
-                // Сейчас `SubstitutionMap` умеет только обычный prefix search
-                // и final_search(), но не умеет учитывать класс продолжения:
-                // - внутри того же слова
-                // - через пробел
-                // - через пунктуацию
             }
 
             LexemeTransfer::WordStart
@@ -595,15 +578,20 @@ impl SurgeTable {
     /// Финализирует живого кандидата при стабилизации потока.
     ///
     /// Здесь новая лексема уже не прибавляется.
-    /// Мы оцениваем текущий накопленный кандидат "как есть".
+    /// Мы оцениваем накопленный кандидатом текст "как есть".
     fn _finalize_candidate_on_stabilization(&mut self) {
 
-        let search_state = std::mem::take(&mut self._candidate_position);
+        // Забираем владение енумом позиции кандидата из структуры разделочного стола. Его
+        // уже не вернем. Там останется дефолт, то есть _CandidatePosition::_None.
+        let candidate_position = std::mem::replace(&mut self._candidate_position,
+                                                   _CandidatePosition::_None);
 
-        let _CandidatePosition::_CandidateGrowing(candidate) = search_state else {
+        // Нас интересует только живой кандидат. Если кандидата нет, нечего подставлять.
+        let _CandidatePosition::_CandidateGrowing(candidate) = candidate_position else {
             return;
         };
 
+        // Выделить накопленный кандидатом текст и искать его в карте замен.
         let candidate_string = self._get_candidate_string(&candidate._prong);
         let decision = _SearchDecision::_make_decision(&self._subst_map, &candidate_string, true);
 
@@ -614,20 +602,16 @@ impl SurgeTable {
                 _action,
                 _rollback_fn,
             } => {
-                // Финальная подстановка на уже собранном кандидате.
+                // Выполнить подстановку.
                 let mut candidate = candidate;
-
-                if matches!(candidate._status, _CandidateStatus::_ExactReady) {
-                    self._undo_exact_ready(&mut candidate);
-                }
-
-                self._materialize_exact_candidate(
+                self._apply_substitution_for_candidate(
                     &mut candidate,
                     &_replacement_text,
                     _action,
                     _rollback_fn,
                 );
 
+                // Финализировать подстановку передачей зубца в гребень.
                 self._comb.push(candidate._prong);
             }
 
@@ -678,19 +662,25 @@ impl SurgeTable {
         }
     }   // _commit_exact_ready_candidate()
 
-    /// Выполняет exact-подстановку над текущим кандидатом и
-    /// обновляет его зубец.
+    /// Выполняет exact-подстановку над текущим кандидатом и обновляет его зубец. Если кандидат
+    /// в состоянии _ExactReady, а значит, отвечает за последнюю подстановку, откатываем его и
+    /// подстановку перед накатом текущей.
     ///
     /// Предполагается, что:
-    /// - предыдущий eager exact (если был) уже откатан;
     /// - новый сырой текст текущей лексемы (если он есть) уже принят в cutting_board.
-    fn _materialize_exact_candidate(
+    fn _apply_substitution_for_candidate(
         &mut self,
         candidate: &mut _Candidate,
         replacement_text: &str,
         action: SupplementaryAction,
         rollback_fn: Option<SupplementaryRollback>,
     ) {
+        // Если короткий eager exact уже висит на экране,
+        // сначала честно откатываем его обратно к сырому виду кандидата.
+        if matches!(candidate._status, _CandidateStatus::_ExactReady) {
+            self._undo_exact_ready(candidate);
+        }
+
         action(self, WhenApplied::Before);
 
         self._replace_candidate_tail_in_franken_board(
@@ -703,33 +693,44 @@ impl SurgeTable {
         candidate._prong._cb_end = self._cutting_board.len();
         candidate._prong._fb_end = self._franken_board.len();
         candidate._prong._rollback_fn = rollback_fn;
-    }   // _materialize_exact_candidate()
+
+    }   // _apply_substitution_for_candidate()
 
     /// Откатывает состоявшуюся раннюю подстановку по всем правилам:
     /// вызов rollback(Before) -> восстановление сырого текста -> вызов rollback(After).
+    /// Гребень не затрагивается, зубец еще во владении кандидата.
     fn _undo_exact_ready(&mut self, candidate: &mut _Candidate) {
         if matches!(candidate._status, _CandidateStatus::_ExactReady) {
 
+            // Выполнить дополнительные откатные действия до стирания подстановки.
             if let Some(rb) = candidate._prong._rollback_fn {
                 rb(self, WhenApplied::Before);
             }
 
-            // Замена текста на сырой текст из разделочной доски
+            // Стереть подстановку.
             let raw_tail_len = self._franken_board.len() - candidate._prong._fb_start;
             if raw_tail_len > 0 {
                 self._franken_board.truncate(candidate._prong._fb_start);
                 self._screen_transfer_vec.push(ScreenTransfer::Backspace(raw_tail_len));
             }
 
+            // Заменить на сырой текст из разделочной доски.
             let original_raw_text: String = self._cutting_board[candidate._prong._cb_start..].iter().collect();
             if !original_raw_text.is_empty() {
                 self._franken_board.extend(original_raw_text.chars());
                 self._screen_transfer_vec.push(ScreenTransfer::Text(original_raw_text));
             }
 
+            // Выполнить дополнительные откатные действия после отката подстановки.
             if let Some(rb) = candidate._prong._rollback_fn {
                 rb(self, WhenApplied::After);
             }
+
+            // Привести зубец в исходное состояние.
+            candidate._prong._cb_end = 0;
+            candidate._prong._fb_end = 0;
+            candidate._prong._rollback_fn = None;
+
         }
     }   // _undo_exact_ready()
 }   // impl SurgeTable
@@ -754,7 +755,6 @@ impl SurgeTable {
 
         let chars: Vec<char> = text.chars().collect();
         self._cutting_board.extend_from_slice(&chars);
-        self._prune_if_needed();
     }   // _write_raw_text_to_cutting_board()
 
     /// Пишет сырой текст во franken_board и генерирует экранную передачу.
@@ -778,14 +778,17 @@ impl SurgeTable {
     fn _replace_candidate_tail_in_franken_board(&mut self, fb_start: usize,
                                                 replacement_text: &str)
     {
+        // Рассчитать длину стираемого хвоста.
         let raw_tail_len = self._franken_board.len() - fb_start;
 
+        // Стереть хвост.
         if raw_tail_len > 0 {
             self._franken_board.truncate(fb_start);
             self._screen_transfer_vec
                 .push(ScreenTransfer::Backspace(raw_tail_len));
         }
 
+        // Дописать замену.
         if !replacement_text.is_empty() {
             self._franken_board.extend(replacement_text.chars());
             self._screen_transfer_vec
@@ -817,12 +820,11 @@ impl SurgeTable {
         let current_len = self._cutting_board.len();
 
         let target_len = current_len.saturating_sub(n);
-        let target_len = target_len.max(self._stabilization_anchor);
         let actual_erase = current_len - target_len;
 
         if actual_erase == 0 {
             return;
-        }   // if
+        }
 
         self._cutting_board.truncate(target_len);
         self._franken_board.truncate(target_len);
@@ -833,10 +835,12 @@ impl SurgeTable {
             .push(ScreenTransfer::Backspace(actual_erase));
     }   // _apply_gboard_erase()
 
-    /// Records a Gboard stabilization event.
+    /// Очищает разделочную доску при стабилизации потока.
+    /// Весь текст уже отправлен на экран и отражен во franken_board.
     fn _mark_gboard_stabilization(&mut self) {
-        self._stabilization_anchor = self._cutting_board.len();
+        self._cutting_board.clear();
         self._comb.clear();
+        self._prune_if_needed();
     }   // _mark_gboard_stabilization()
 
     /// Clears all state.
@@ -844,7 +848,6 @@ impl SurgeTable {
         self._cutting_board.clear();
         self._franken_board.clear();
         self._comb.clear();
-        self._stabilization_anchor = 0;
         self.flag._clear();
         self._candidate_position = _CandidatePosition::_None;
     }   // _clear_all()
@@ -853,11 +856,18 @@ impl SurgeTable {
         // TODO: implement prong-aware trim.
     }   // _trim_comb()
 
+    /// Ограничивает рост доски Франкенштейна.
+    ///
+    /// Оставляет хвост длиной _MAX_BOARD_CAPACITY для нужд
+    /// голосовых команд (например, "стереть слово"), которым нужен
+    /// левый контекст на экране.
     fn _prune_if_needed(&mut self) {
-        // TODO: implement sliding window pruning.
-        let _ = _MAX_BOARD_CAPACITY;
+        let len = self._franken_board.len();
+        if len > _MAX_BOARD_CAPACITY {
+            let drop_count = len - _MAX_BOARD_CAPACITY;
+            self._franken_board.drain(..drop_count);
+        }
     }   // _prune_if_needed()
-
 }   // impl SurgeTable
 
 impl Drop for SurgeTable {
