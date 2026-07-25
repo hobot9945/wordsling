@@ -1,20 +1,15 @@
-//! lexer_plus_text_processor.rs — временный отладочный стенд для связки `Lexer -> FrankenLab`.
+//! mission.rs — Библиотека тестовых сценариев (миссий).
 //!
-//! Назначение:
-//! - подавать на вход текстовые chunks в формате после `TcpServer`;
-//! - прогонять их через `Lexer` и `FrankenLab`;
-//! - собирать `ScreenTransfer` в памяти;
-//! - применять их к строковому буферу как к "виртуальному экрану".
+//! Хранит сырые дампы фрагментированных TCP-потоков (имитация чанков от Gboard)
+//! и соответствующие им ожидаемые строки.
+//! Разделение позволяет использовать одни и те же данные как для безопасных
+//! тестов в памяти, так и для стресс-тестов вывода на экран ОС.
 #![cfg(test)]
 
-#[allow(unused_imports)] use hobolib::prln;
-use crate::core::core_tests::{_apply_screen_transfers, _dump_transfers, _run_pipeline};
-
-#[test]
-fn debug_spec_phrase_through_lexer_and_frankenlab() {
+pub(super) fn the_vacha_river() -> (Vec<&'static str>, String) {
 
     // Пример из technical_specification.md, раздел 5.10.
-    let chunks = &[
+    let input = vec![
         "под", " со", "бо", "ю", " но", "г", " не", " чу", "я",
         "[1]ю*", " и", " ка", "ча", "ется", " зем", "ля", "*",
         ",", " но", "вая", " стро", "[11]", "\n", "[1]*", "\n", "*",
@@ -56,14 +51,7 @@ fn debug_spec_phrase_through_lexer_and_frankenlab() {
         "[10]всем про орех", "[13]семь прорех*", " воск", "лица", "[9]!", "*"
     ];
 
-    let transfers = _run_pipeline(chunks);
-    let final_text = _apply_screen_transfers(&transfers);
-
-    println!("{}", final_text);
-
-    assert_eq!(
-        final_text,
-        "под собою ног не чую и качается земля,
+    let output= String::from("под собою ног не чую и качается земля,
 третий месяц я бичую, так как списан подчистую
 с китобоя корабля точка
 ну, а так как я бичую,
@@ -77,8 +65,24 @@ fn debug_spec_phrase_through_lexer_and_frankenlab() {
 рубль не деньги, рубль бумажка,
 экономить-тяжкий грех точка
 эх, душа моя, тельняшка-
-восемь полос, семь прорех!",
-        "Неожиданный поток ScreenTransfer:\n{}",
-        _dump_transfers(&transfers)
-    );
-}   // debug_spec_phrase_through_lexer_and_frankenlab()
+восемь полос, семь прорех!");
+
+    (input, output)
+
+}   // the_vacha_river()
+
+
+pub(super) fn parentheses() -> (Vec<&'static str>, String) {
+
+    // Пример из technical_specification.md, раздел 5.10.
+    let input = vec![
+        "под", " скобка открывается", " со", "бо", "ю", " скобка закрывается", " но", "г",
+        " скобка открывается", "[2]ся", " не", " скобка закрывается", "[2]ся", " чу", "я",
+        "[1]ю.*", " и качается земля.", "\n", "третий месяц"
+    ];
+
+    let output= String::from("Под (собою) ног скобка открывается не скобка закрывается чую. И качается земля.");
+
+    (input, output)
+
+}   // parantheses()

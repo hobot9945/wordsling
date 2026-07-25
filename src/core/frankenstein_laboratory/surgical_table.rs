@@ -16,11 +16,11 @@
 use hobolib::prln;
 use crate::core::lexeme_transfer::LexemeTransfer;
 use crate::core::screen_transfer::ScreenTransfer;
-use crate::core::text_processor::substitution_map::{
+use crate::core::frankenstein_laboratory::substitution_map::{
     SubstitutionMap,
     SubstitutionSearchResult,
 };
-use crate::core::text_processor::supplementary_action_map::{
+use crate::core::frankenstein_laboratory::supplementary_action_map::{
     SupplementaryAction,
     SupplementaryRollback,
     WhenApplied,
@@ -32,19 +32,27 @@ const _MAX_BOARD_CAPACITY: usize = 2000;
 /// Represents mapping between a segment in the cutting board
 /// and the corresponding segment in the franken board.
 #[derive(Default, Clone)]
-struct _Prong {
-    _cb_start: usize,
+pub(super) struct Prong {
+    pub(super) cb_start: usize,
     _cb_end: usize,
-    _fb_start: usize,
+    pub(super) fb_start: usize,
     _fb_end: usize,
     _rollback_fn: Option<SupplementaryRollback>,
 }   // _Prong
 
 /// Разные служебные флаги проекта.
-/// Пока не трогаю.
-#[derive(Default)]
 pub(super) struct Flag {
-    pub(super) dummy_flag: bool,
+    pub(super) suppress_next_whitespace: bool,
+    pub(super) capitalize_next_word: bool,
+}
+
+impl Default for Flag {
+    fn default() -> Self {
+        Self {
+            suppress_next_whitespace: false,
+            capitalize_next_word: true, // По умолчанию первое слово с заглавной
+        }
+    }
 }
 
 impl Flag {
@@ -52,7 +60,10 @@ impl Flag {
         Self::default()
     }
 
-    fn _clear(&mut self) {}
+    fn _clear(&mut self) {
+        self.suppress_next_whitespace = false;
+        self.capitalize_next_word = false;
+    }
 }   // impl Flag
 
 // =============================================================================
@@ -89,7 +100,7 @@ struct _Candidate {
     /// `_prong._cb_end` / `_prong._fb_end`
     ///     границы последнего "готового" точного совпадения внутри кандидата,
     ///     если кандидат когда-либо входил в `_ExactReady`.
-    _prong: _Prong,
+    _prong: Prong,
 
     /// Текущий статус роста кандидата.
     _status: _CandidateStatus,
@@ -190,9 +201,13 @@ pub(super) struct SurgeTable {
     /// Processed text mirroring the screen content.
     _franken_board: Vec<char>,
 
+    // Точка, до которой хранится история, а после которой доска франкенштейна превращается в
+    // отображение разделочной доски.
+    _fb_rubicon: usize,
+
     /// Активные зубцы в нестабильной зоне.
     /// Здесь лежат только уже состоявшиеся подстановки.
-    _comb: Vec<_Prong>,
+    _comb: Vec<Prong>,
 
     /// Текущее состояние автомата поиска фразового ключа.
     _candidate_position: _CandidatePosition,
@@ -213,6 +228,7 @@ impl SurgeTable {
         SurgeTable {
             _cutting_board: Vec::new(),
             _franken_board: Vec::new(),
+            _fb_rubicon: 0,
             _comb: Vec::new(),
             _candidate_position: _CandidatePosition::_None,
             flag: Flag::new(),
@@ -244,10 +260,27 @@ impl SurgeTable {
     pub(super) fn process_lexeme(&mut self, lexeme: &LexemeTransfer) {
         self._preprocess_employing_candidate(lexeme);
 
-        if let Some(text_lexeme) = Self::_extract_significant_text(lexeme) {
+        // --- Капитализация  ---
+        // Если флаг взведён и пришёл WordPart, капитализируем первый символ.
+        // Создаём новую лексему с изменённым текстом и подменяем ссылку.
+        let owned_lexeme: LexemeTransfer;
+        let effective_lexeme = if self.flag.capitalize_next_word {
+            if let LexemeTransfer::WordPart(text) = lexeme {
+                self.flag.capitalize_next_word = false;
+                let capitalized: String = Self::_capitalize_first_char(text);
+                owned_lexeme = LexemeTransfer::WordPart(capitalized);
+                &owned_lexeme
+            } else {
+                lexeme
+            }
+        } else {
+            lexeme
+        };
+
+        if let Some(text_lexeme) = Self::_extract_significant_text(effective_lexeme) {
             self._process_text_lexeme(&text_lexeme);
         } else {
-            self._process_service_lexeme(lexeme);
+            self._process_service_lexeme(effective_lexeme);
         }
     }   // process_lexeme()
 
@@ -354,10 +387,10 @@ impl SurgeTable {
     /// Создает нового растущего кандидата, начиная с текущего хвоста обеих досок.
     fn _new_candidate(&mut self) -> _CandidatePosition {
         _CandidatePosition::_CandidateGrowing(_Candidate {
-            _prong: _Prong {
-                _cb_start: self._cutting_board.len(),
+            _prong: Prong {
+                cb_start: self._cutting_board.len(),
                 _cb_end: 0,
-                _fb_start: self._franken_board.len(),
+                fb_start: self._franken_board.len(),
                 _fb_end: 0,
                 _rollback_fn: None,
             },
@@ -380,6 +413,28 @@ impl SurgeTable {
     /// Сначала оцениваем гипотетический кандидат,
     /// и только потом решаем, как именно записывать.
     fn _process_text_lexeme(&mut self, lexeme_text: &str) {
+
+        // Перехватчик подавления пробела
+        if self.flag.suppress_next_whitespace {
+            self.flag.suppress_next_whitespace = false;
+
+            if !lexeme_text.is_empty() && lexeme_text.chars().all(|c| c.is_whitespace()) {
+                // Пишем пробел только в сырую доску
+                self._write_raw_text_to_cutting_board(lexeme_text);
+
+                // Прячем этот пробел в зубец, который инициировал подавление
+                if let _CandidatePosition::_CandidateGrowing(ref mut candidate) = self._candidate_position {
+                    // Нужный зубец находится в кандидате
+                    candidate._prong._cb_end = self._cutting_board.len();
+                } else if let Some(last_prong) = self._comb.last_mut() {
+                    // Кандидата нет, значит нужный зубец в гребне.
+                    last_prong._cb_end = self._cutting_board.len();
+                }
+
+                // Прерываем обработку: пробел "проглочен" и не вызовет сдвигов FSM
+                return;
+            }
+        }
 
         // Вынимаем FSM из self, чтобы можно было свободно мутировать self дальше. take() выполняет
         // self._candidate_position = _CandidatePosition::default().
@@ -629,15 +684,15 @@ impl SurgeTable {
 impl SurgeTable {
 
     /// Извлекает текущую строку кандидата из cutting_board.
-    fn _get_candidate_string(&self, prong: &_Prong) -> String {
-        self._cutting_board[prong._cb_start..]
+    fn _get_candidate_string(&self, prong: &Prong) -> String {
+        self._cutting_board[prong.cb_start..]
             .iter()
             .collect::<String>()
     }   // _get_candidate_string()
 
     /// Строит гипотетическую строку кандидата:
     /// текущий хвост cutting_board + новая значимая лексема.
-    fn _build_candidate_string_new_text_included(&self, prong: &_Prong, text: &str) -> String {
+    fn _build_candidate_string_new_text_included(&self, prong: &Prong, text: &str) -> String {
         let mut out = self._get_candidate_string(prong);
         out.push_str(text);
         out
@@ -669,14 +724,14 @@ impl SurgeTable {
             self._undo_exact_ready(candidate);
         }
 
-        action(self, WhenApplied::Before);
+        action(self, &mut candidate._prong, WhenApplied::Before);
 
         self._replace_candidate_tail_in_franken_board(
-            candidate._prong._fb_start,
+            candidate._prong.fb_start,
             replacement_text,
         );
 
-        action(self, WhenApplied::After);
+        action(self, &mut candidate._prong, WhenApplied::After);
 
         candidate._prong._cb_end = self._cutting_board.len();
         candidate._prong._fb_end = self._franken_board.len();
@@ -692,18 +747,18 @@ impl SurgeTable {
 
             // Выполнить дополнительные откатные действия до стирания подстановки.
             if let Some(rb) = candidate._prong._rollback_fn {
-                rb(self, WhenApplied::Before);
+                rb(self, &mut candidate._prong, WhenApplied::Before);
             }
 
             // Стереть подстановку.
-            let raw_tail_len = self._franken_board.len() - candidate._prong._fb_start;
+            let raw_tail_len = self._franken_board.len() - candidate._prong.fb_start;
             if raw_tail_len > 0 {
-                self._franken_board.truncate(candidate._prong._fb_start);
+                self._franken_board.truncate(candidate._prong.fb_start);
                 self._screen_transfer_vec.push(ScreenTransfer::Backspace(raw_tail_len));
             }
 
             // Заменить на сырой текст из разделочной доски.
-            let original_raw_text: String = self._cutting_board[candidate._prong._cb_start..].iter().collect();
+            let original_raw_text: String = self._cutting_board[candidate._prong.cb_start..].iter().collect();
             if !original_raw_text.is_empty() {
                 self._franken_board.extend(original_raw_text.chars());
                 self._screen_transfer_vec.push(ScreenTransfer::Text(original_raw_text));
@@ -711,7 +766,7 @@ impl SurgeTable {
 
             // Выполнить дополнительные откатные действия после отката подстановки.
             if let Some(rb) = candidate._prong._rollback_fn {
-                rb(self, WhenApplied::After);
+                rb(self, &mut candidate._prong, WhenApplied::After);
             }
 
             // Привести зубец в исходное состояние.
@@ -840,103 +895,116 @@ impl SurgeTable {
             _CommitExactReadyToComb,
         }   // _CandidateEraseReaction
 
-        // Определить судьбу.
-        let candidate_erase_reaction = match &self._candidate_position {
+        // Определить candidate_destiny.
+        let candidate_destiny = match &self._candidate_position {
             _CandidatePosition::_CandidateGrowing(candidate) => {
                 match candidate._status {
                     _CandidateStatus::_ExactReady => {
-                        // exact-ready кандидат защищен до границы своего exact-зубца.
-                        // Если новый конец cutting_board уйдет левее cb_end,
-                        // значит подстановка захвачена забоями.
+                        // exact-ready кандидат:  уже есть подстановка, но она может измениться.
                         if target_cb_len < candidate._prong._cb_end {
+                            // Кандидат затронут забоями, подлежит фиксации в гребне
                             _CandidateDestiny::_CommitExactReadyToComb
                         } else {
+                            // Забои не дошли до кандидата, можно его не трогать
                             _CandidateDestiny::_Keep
                         }
                     }
 
                     _CandidateStatus::_Partial => {
-                        // partial-кандидат можно сохранять, пока забои не достигли
-                        // самого начала кандидата.
-                        if target_cb_len < candidate._prong._cb_start {
+                        // partial-кандидат: подстановки еще нет, хотя с началом фразового ключа он совпал;
+                        // _prong._cb_start - начало возможной подстановки, _prong._cb_end = 0 (не определен).
+                        if target_cb_len < candidate._prong.cb_start {
+                            // Покрыт забоями: приговорен к расстрелу.
                             _CandidateDestiny::_Drop
                         } else {
+                            // Забои не дошли до него: пусть живет.
                             _CandidateDestiny::_Keep
                         }
                     }
                 }   // match
             }
 
-            // "Вакансия" после WordStart не несет собственного текста.
-            // Любой внешний erase считаем достаточным поводом её закрыть.
+            // "Вакансия": кандидата еще нет. Забой говорит, что и не будет.
             _CandidatePosition::_VacancyOpen => {
-                _CandidateDestiny::_Drop
+                _CandidateDestiny::_Drop    // приведет к закрытию вакансии
             }
 
+            // Кандидата нет. Судьба не имеет значения.
             _CandidatePosition::_None => {
                 _CandidateDestiny::_Keep
             }
         };   // match
 
-        // Исполнить.
-        match candidate_erase_reaction {
+        // Исполнить candidate_destiny.
+        match candidate_destiny {
             _CandidateDestiny::_Keep => {
-                // Ничего не делать.
+                // Оставить кандидата в покое.
             }
 
             _CandidateDestiny::_Drop => {
+                // Расстрелять беднягу.
                 self._candidate_position = _CandidatePosition::_None;
             }
 
             _CandidateDestiny::_CommitExactReadyToComb => {
+                // Кандидат есть, он выполнил подстановку. Теперь он подлежит фиксации в гребне.
+
+                // Забрать владение позицией. Место для нового кандидата освобождается.
                 let candidate_position = std::mem::replace(
                     &mut self._candidate_position,
                     _CandidatePosition::_None,
                 );
 
+                // Забрать владение кандидатом.
                 let _CandidatePosition::_CandidateGrowing(candidate) = candidate_position else {
                     unreachable!("candidate erase reaction diverged from candidate state");
                 };
 
                 debug_assert!(matches!(candidate._status, _CandidateStatus::_ExactReady));
 
-                // ВАЖНО:
-                // здесь мы НЕ откатываем подстановку.
-                // Мы только превращаем висящий eager-candidate в обычный последний зубец
-                // гребня. Ниже общий цикл сам решит:
-                // - сначала подчистить свободный хвост после зубца;
-                // - потом, если забои еще остались, разрушить сам зубец.
+                // ВАЖНО: здесь мы НЕ откатываем подстановку. Мы только превращаем висящий
+                // eager-candidate в обычный последний зубец гребня. Ниже цикл будет забивать и
+                // откатывать на общих основаниях.
+                // - сначала подчистит свободный хвост после зубца;
+                // - потом, если забои еще остались, разрушит сам зубец.
                 self._comb.push(candidate._prong);
             }
         }   // match
 
         // ---------------------------------------------------------------------
-        // Шаг 2. Основной цикл забоев справа налево.
+        // Шаг 2. Основной цикл забоев справа налево:
+        // - сначала подчистит свободный хвост после зубца;
+        // - потом, если забои еще остались, разрушит сам зубец.
         // ---------------------------------------------------------------------
         while requested_erase > 0 && !self._cutting_board.is_empty() {
+            // Нужно стирать и есть что стирать.
+
+            // Длина доски до стирания
             let current_cb_len = self._cutting_board.len();
 
-            // Проверить, упирается ли правый край cutting_board в последний зубец.
-            let end_is_covered_by_last_prong = match self._comb.last() {
-                Some(prong) => prong._cb_end == current_cb_len,
+            // Проверить, покрывается ли хвост cutting_board последним зубом.
+            let cb_tail_is_covered_by_last_prong = match self._comb.last() {
+                Some(prong) => prong._cb_end >= current_cb_len,
                 None => false,
             };
 
-            if end_is_covered_by_last_prong {
+            if cb_tail_is_covered_by_last_prong {
                 // =============================================================
                 // Случай А. Правый край покрыт последним зубцом.
                 // Значит, свободного хвоста справа уже нет, и забои пришли
                 // непосредственно в подстановку.
                 // =============================================================
-                let prong = self._comb.pop()
-                    .expect("end_is_covered_by_last_prong implies non-empty comb");
+
+                // Вынуть зубец из массива.
+                let mut prong = self._comb.pop()
+                    .expect("cb_tail_is_covered_by_last_prong implies non-empty comb");
 
                 debug_assert_eq!(prong._cb_end, current_cb_len);
                 debug_assert_eq!(prong._fb_end, self._franken_board.len());
 
                 // 1. Дополнительный rollback до разрушения replacement-а.
                 if let Some(rb) = prong._rollback_fn {
-                    rb(self, WhenApplied::Before);
+                    rb(self, &mut prong, WhenApplied::Before);
                 }
 
                 // 2. Полностью стереть replacement из franken_board.
@@ -946,15 +1014,17 @@ impl SurgeTable {
                 // Это ключевая идея алгоритма:
                 // частичное разрушение зубца = полный откат подстановки
                 // + восстановление surviving raw tail.
-                let replacement_len = self._franken_board.len() - prong._fb_start;
+
+                // replacement_len == 0 - легальный случай пустой подстановки.
+                let replacement_len = self._franken_board.len() - prong.fb_start;
                 if replacement_len > 0 {
-                    self._franken_board.truncate(prong._fb_start);
+                    self._franken_board.truncate(prong.fb_start);
                     self._screen_transfer_vec
                         .push(ScreenTransfer::Backspace(replacement_len));
                 }
 
                 // 3. Списать заказанные забои с сырого текста зубца.
-                let prong_raw_len = prong._cb_end - prong._cb_start;
+                let prong_raw_len = prong._cb_end - prong.cb_start;
                 let erase_now = requested_erase.min(prong_raw_len);
 
                 let new_cb_len = current_cb_len - erase_now;
@@ -966,29 +1036,22 @@ impl SurgeTable {
                 // Если зубец разрушен не полностью, то после удаления части сырого ключа
                 // надо вернуть оставшийся кусок во franken_board.
                 //
-                // Берем текст от начала зубца до нового конца cutting_board.
-                // После этого справа снова образуется обычный свободный хвост,
-                // идентичный в cutting_board и franken_board.
-                if new_cb_len > prong._cb_start {
-                    let surviving_raw_text: String =
-                        self._cutting_board[prong._cb_start..]
-                            .iter()
-                            .collect();
+                // Берем текст от начала зубца до нового конца cutting_board и добавляем
+                // во franken_board. После этого справа, возможно, образуется свободный хвост.
+                if new_cb_len > prong.cb_start {
+                    let tail_slice = &self._cutting_board[prong.cb_start..];
 
-                    if !surviving_raw_text.is_empty() {
-                        self._franken_board.extend(surviving_raw_text.chars());
-                        self._screen_transfer_vec
-                            .push(ScreenTransfer::Text(surviving_raw_text));
-                    }
+                    // Добавляем срез напрямую без лишних итераторов
+                    self._franken_board.extend_from_slice(tail_slice);
+
+                    // String собираем исключительно для команды ScreenTransfer
+                    let surviving_text: String = tail_slice.iter().collect();
+                    self._screen_transfer_vec.push(ScreenTransfer::Text(surviving_text));
                 }
 
                 // 5. Дополнительный rollback после восстановления сырого хвоста.
-                //
-                // Держим тот же порядок, что и в `_undo_exact_ready()`:
-                // rollback(Before) -> убрать replacement ->
-                // восстановить raw -> rollback(After)
                 if let Some(rb) = prong._rollback_fn {
-                    rb(self, WhenApplied::After);
+                    rb(self, &mut prong, WhenApplied::After);
                 }
 
             } else {
@@ -1001,7 +1064,7 @@ impl SurgeTable {
                 // Если зубцов нет, хвост начинается с нуля.
                 let (free_tail_cb_start, free_tail_fb_start) = match self._comb.last() {
                     Some(prong) => (prong._cb_end, prong._fb_end),
-                    None => (0, 0),
+                    None => (0, self._fb_rubicon),
                 };
 
                 let free_tail_cb_len = self._cutting_board.len() - free_tail_cb_start;
@@ -1011,7 +1074,13 @@ impl SurgeTable {
                 debug_assert_eq!(free_tail_cb_len, free_tail_fb_len);
 
                 // Если сюда попали, свободный хвост должен существовать.
+                debug_assert!(
+                    free_tail_cb_len > 0,
+                    "Infinite loop protection triggered: comb does not cover the board, but free tail length is 0"
+                );
+
                 // В release-сборке на всякий случай выходим, чтобы не зациклиться.
+                #[cfg(not(debug_assertions))]
                 if free_tail_cb_len == 0 {
                     break;
                 }
@@ -1037,8 +1106,51 @@ impl SurgeTable {
     fn _mark_gboard_stabilization(&mut self) {
         self._cutting_board.clear();
         self._comb.clear();
+        self._fb_rubicon = self._franken_board.len();
         self._prune_if_needed();
     }   // _mark_gboard_stabilization()
+
+    /// Проверяет, стоит ли пробельный символ непосредственно слева от границ зубца
+    /// одновременно в обеих досках.
+    ///
+    /// Двойная проверка нужна потому, что слева от кандидата может находиться
+    /// уже состоявшаяся подстановка. Тогда символ в cutting_board — это хвост
+    /// сырого ключа, а символ во franken_board — хвост replacement-а,
+    /// и они не совпадают.
+    ///
+    /// # Параметры
+    /// - `prong`: зубец, левые границы которого проверяются.
+    ///
+    /// # Возвращает
+    /// `true`, если слева в обеих досках стоит пробельный символ.
+    pub(super) fn _has_whitespace_before_candidate(&self, prong: &Prong) -> bool {
+
+        if prong.cb_start == 0 || prong.fb_start == 0 {
+            return false;
+        }   // if
+
+        let cb_char = self._cutting_board.get(prong.cb_start - 1);
+        let fb_char = self._franken_board.get(prong.fb_start - 1);
+
+        match (cb_char, fb_char) {
+            (Some(cb), Some(fb)) => cb.is_whitespace() && fb.is_whitespace(),
+            _ => false,
+        }   // match
+    }   // _has_whitespace_before()
+
+    /// Капитализирует первый символ строки.
+    ///
+    /// Остальные символы остаются без изменений (они уже в lowercase после лексера).
+    fn _capitalize_first_char(s: &str) -> String {
+        let mut chars = s.chars();
+        match chars.next() {
+            None => String::new(),
+            Some(first) => {
+                let upper: String = first.to_uppercase().collect();
+                upper + chars.as_str()
+            }
+        }
+    }   // _capitalize_first_char()
 
     /// Clears all state.
     fn _clear_all(&mut self) {
@@ -1048,10 +1160,6 @@ impl SurgeTable {
         self.flag._clear();
         self._candidate_position = _CandidatePosition::_None;
     }   // _clear_all()
-
-    fn _trim_comb(&mut self, _new_len: usize) {
-        // TODO: implement prong-aware trim.
-    }   // _trim_comb()
 
     /// Ограничивает рост доски Франкенштейна.
     ///
@@ -1063,6 +1171,7 @@ impl SurgeTable {
         if len > _MAX_BOARD_CAPACITY {
             let drop_count = len - _MAX_BOARD_CAPACITY;
             self._franken_board.drain(..drop_count);
+            self._fb_rubicon = self._fb_rubicon.saturating_sub(drop_count);
         }
     }   // _prune_if_needed()
 }   // impl SurgeTable

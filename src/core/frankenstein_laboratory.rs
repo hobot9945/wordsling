@@ -1,4 +1,4 @@
-//! text_processor.rs — Post-lexical text processor.
+//! frankenstein_laboratory — Post-lexical text processor.
 //!
 //! Consumes lexemes from the lexer and produces screen transfer commands
 //! for the screen writer.
@@ -24,9 +24,9 @@ use std::thread;
 use crate::core::lexeme_transfer::LexemeTransfer;
 use crate::{log_err, log_inf};
 use crate::core::screen_transfer::ScreenTransfer;
-use crate::core::text_processor::surgical_table::SurgeTable;
+use crate::core::frankenstein_laboratory::surgical_table::SurgeTable;
 
-/// A wrapper around a thread, executing the text_processor state machine.
+/// A wrapper around a thread, executing the frankenstein_laboratory state machine.
 pub struct FrankenLab {
     _handle: Option<thread::JoinHandle<()>>,
 }   // FrankenLab

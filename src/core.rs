@@ -19,7 +19,7 @@ mod lexer;
 mod screen_transfer;
 mod screen_writer;
 mod user_activity_tracker;
-mod text_processor;
+mod frankenstein_laboratory;
 mod core_tests;
 
 use std::sync::mpsc;
@@ -31,7 +31,7 @@ use screen_writer::ScreenWriter;
 use crate::tcp_server::TcpServer;
 use user_activity_tracker::UserActivityTracker;
 use screen_transfer::ScreenTransfer;
-use crate::core::text_processor::FrankenLab;
+use crate::core::frankenstein_laboratory::FrankenLab;
 
 pub struct Core {
     // Pipeline stages are stored in order.

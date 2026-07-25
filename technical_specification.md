@@ -366,15 +366,18 @@ pub enum ScreenTransfer {
 
 `SurgeTable` maintains two character-level buffers (`Vec<char>`):
 
-- **`cutting_board`** — the raw text stream from Gboard (after lexer
-  decapitalization). This board reflects exactly what Gboard sent,
-  unaffected by substitutions.
+- **`cutting_board`** — the raw unstable tail from Gboard (after lexer
+  decapitalization). It reflects exactly what Gboard sent for the
+  current unstable region and is cleared on stabilization.
 
 - **`franken_board`** — the processed text mirroring what the focused
   Windows input field should contain. This board diverges from the
-  cutting board when a substitution replaces raw text with different text.
+  cutting board when a substitution replaces raw text with different
+  text. Unlike the cutting board, it may retain a bounded stable left
+  context across stabilizations for future host-side commands.
 
-Before the first substitution, both boards are identical.
+Before the first substitution inside the unstable region, both boards
+are identical.
 
 ### 6.4. Text substitution mechanism
 
@@ -436,10 +439,8 @@ Four outcomes are possible:
   earlier replacement is undone first.
 
 - **`ExactMatch`** — unambiguous match. The substitution is applied
-  as final. If a previous eager replacement existed, it is undone
-  before the final one is applied.
-- **`ExactMatch`** — unambiguous match. The substitution is applied
-  as described in 6.4.1.
+  immediately as final. If a previous eager replacement existed, it
+  is undone before the final one is applied.
 
 #### 6.4.4. Stabilization and final search
 
@@ -462,34 +463,43 @@ Each prong records:
 - `rollback_fn` — an optional function pointer to undo side effects
   of the substitution (e.g., clear a capitalization flag).
 
-Prongs exist solely for rollback. They are cleared on stabilization,
-because Gboard guarantees it will never erase text before the
-stabilization anchor.
+Prongs exist solely for rollback inside the current unstable raw region.
+They are cleared on stabilization, because the cutting board is cleared
+at that point and later Gboard erases can no longer reach them.
 
 ### 6.6. Backspace handling with prongs
 
-When a Gboard `BackspaceCount(N)` arrives, the erase is applied to the
-cutting board first (respecting the stabilization anchor). Then the
-effect on the franken board depends on whether any prongs are affected.
+When a Gboard `BackspaceCount(N)` arrives, SurgeTable does not treat it
+as a blind truncation. The erase is processed from right to left over
+the current unstable raw region.
 
-**Case A: no prongs affected.**
-The same N characters are removed from the franken board and
-`ScreenTransfer::Backspace(N)` is generated. Straightforward.
+Before the main erase loop, the table evaluates the live candidate:
+- if the erase touches only the free tail after the candidate, the
+  candidate stays alive;
+- if it reaches the start of a `_Partial` candidate, the candidate is
+  dropped;
+- if it reaches the exact-applied part of an `_ExactReady` candidate,
+  that candidate is committed into the comb so the erase loop can handle
+  it uniformly as the rightmost prong.
 
-**Case B: a prong is fully covered by the erase.**
-The entire raw key phrase and the entire replacement text are removed
-from their respective boards. The rollback function is called.
-The prong is deleted.
+The erase loop then repeats until either `N` raw characters are consumed
+or the cutting board becomes empty.
 
-**Case C: a prong is partially covered by the erase.**
-This is the most complex case:
-1. The cutting board loses exactly N raw characters as commanded.
-2. The entire replacement text is removed from the franken board.
-3. The rollback function is called.
-4. The prong is deleted.
-5. The surviving raw tail from the cutting board (starting at the
-   former prong's `cb_start`) is appended to the franken board.
-   This restores identity between the two boards in the affected zone.
+**Case A: free tail to the right of the last prong.**
+The same number of characters is removed from both boards, and
+`ScreenTransfer::Backspace(k)` is generated.
+
+**Case B: the erase reaches the rightmost prong.**
+The currently visible replacement is fully rolled back:
+1. call `rollback(Before)`;
+2. remove the whole replacement text from the franken board;
+3. consume as many raw characters as needed from the corresponding raw
+   key phrase in the cutting board;
+4. restore the surviving raw tail (if any) into the franken board;
+5. call `rollback(After)`.
+
+Full destruction of a prong is just the same case with an empty
+surviving raw tail.
 
 ### 6.7. Substitution map
 
@@ -515,13 +525,19 @@ once before the replacement (`WhenApplied::Before`) and once after
 (`WhenApplied::After`). This two-phase call allows actions that need
 to inspect or modify the context on both sides of the replacement.
 
-The rollback function, if present, is stored in the prong and called
+The rollback function, if present, is stored in the corresponding prong
+and called when an already applied substitution must be undone.
+
 ### 6.8. Implementation status
 
 FrankenLab has been refactored into a reactive state machine built around
-`SurgeTable`. The table maintains the two boards, enforces Gboard
-stabilization anchors, and processes backspace commands safely using
-character-level vectors.
+`SurgeTable`.
+
+The table currently maintains two boards with different lifetimes:
+- `cutting_board` stores only the current unstable raw tail and is
+  cleared on stabilization;
+- `franken_board` mirrors the processed screen text and may retain
+  a bounded stable left context for future host-side commands.
 
 `SubstitutionMap` with prefix-aware search (no runtime normalization)
 and `SupplementaryActionMap` with action/rollback pairs are fully
@@ -534,22 +550,16 @@ The substitution FSM inside `SurgeTable` is implemented:
 - honest undo of earlier eager replacements when a longer key arrives;
 - commit of `ExactReady` candidates on `NoMatch` or stabilization.
 
+Backspace handling is designed as right-to-left processing of:
+- free raw tail blocks;
+- the rightmost prong, with full replacement rollback and
+  surviving-raw-tail restoration.
+
 Remaining work:
-- Backspace handling with prong-aware rollback (currently simplified).
-- `WordEnd` boundary-aware candidate evaluation.
-- Sliding window pruning of boards.
-- Real implementations of `suppress_space_before` / `suppress_space_after`.
-- Unit tests for substitution scenarios.
-`SurgeTable`. The table maintains the two boards, enforces Gboard
-stabilization anchors, and processes backspace commands safely using
-character-level vectors.
-
-`SubstitutionMap` with prefix-aware search and `SupplementaryActionMap`
-are fully implemented and tested.
-
-The substitution application logic inside `SurgeTable` (search state,
-proactive print, retroactive patch, prong creation, and rollback
-handling) is the current development focus.
+- complete and verify the prong-aware Gboard erase implementation in code;
+- `WordEnd` boundary-aware candidate evaluation;
+- unit tests for substitution and erase scenarios;
+- real implementations of `suppress_space_before` / `suppress_space_after`.
 ---
 
 ## 7. Screen writer

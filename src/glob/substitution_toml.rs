@@ -119,7 +119,7 @@ impl Default for SubstitutionToml {
                 "left parenthesis".to_string(), "open parenthesis".to_string()
             ],
             "(",
-            "suppress_space_after",
+            "suppress_whitespace_after",
         ));
 
         // Right parenthesis: suppress leading space so that
@@ -130,7 +130,7 @@ impl Default for SubstitutionToml {
                 "right parenthesis".to_string(), "close parenthesis".to_string()
             ],
             ")",
-            "suppress_space_before",
+            "suppress_whitespace_before",
         ));
 
         SubstitutionToml {

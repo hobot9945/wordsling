@@ -1,4 +1,9 @@
 [[subs_vec]]
+key_phrases = ["."]
+replacement = "."
+modifier = "capitalize_next_word"
+
+[[subs_vec]]
 key_phrases = [
     "левая скобка",
     "скобка открывается",
@@ -6,7 +11,7 @@ key_phrases = [
     "open parenthesis",
 ]
 replacement = "("
-modifier = "suppress_space_after"
+modifier = "suppress_whitespace_after"
 
 [[subs_vec]]
 key_phrases = [
@@ -16,4 +21,4 @@ key_phrases = [
     "close parenthesis",
 ]
 replacement = ")"
-modifier = "suppress_space_before"
+modifier = "suppress_whitespace_before"

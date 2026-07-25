@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
-use crate::core::text_processor::supplementary_action_map::{
+use crate::core::frankenstein_laboratory::supplementary_action_map::{
     SupplementaryAction,
     SupplementaryActionMap,
     SupplementaryRollback,
@@ -316,7 +316,7 @@ impl SubstitutionMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::text_processor::supplementary_action_map::do_nothing;
+    use crate::core::frankenstein_laboratory::supplementary_action_map::do_nothing;
 
     /// Builds a test dictionary with two entries:
     /// - `"точка"` -> `"."`
