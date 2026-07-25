@@ -529,18 +529,6 @@ impl SurgeTable {
 
             LexemeTransfer::BackspaceCount(n) => {
                 self._apply_gboard_erase(*n as usize);
-
-                // Пока консервативно считаем, что после внешнего erase
-                // поисковый контекст потерян.
-                //
-                // ВАЖНО:
-                // этот участок по-прежнему временный.
-                // После внедрения eager replacement прямолинейный erase
-                // еще сильнее требует отдельной доработки под:
-                // - живой кандидат,
-                // - exact-ready кандидат,
-                // - comb rollback.
-                self._candidate_position = _CandidatePosition::_None;
             }
 
             LexemeTransfer::UserActivityDetected => {
@@ -804,35 +792,244 @@ impl SurgeTable {
 
 impl SurgeTable {
 
-    /// Applies an erase command from Gboard.
+    /// Применяет забои, присланные Gboard.
     ///
-    /// ВНИМАНИЕ:
-    /// это по-прежнему временный прямолинейный вариант.
+    /// Идея алгоритма:
+    /// 1. Сначала решаем судьбу живого кандидата.
+    ///    - Если забои не достигают кандидата, оставляем его в покое.
+    ///    - Если забои разрушают `_Partial` кандидата, просто убиваем его:
+    ///      подстановки там еще не было.
+    ///    - Если забои достигают состоявшейся eager-подстановки живого кандидата
+    ///      (`_ExactReady`), переносим его зубец в гребень, но пока не откатываем.
+    ///      Дальше цикл сам обработает его как обычный последний зубец.
     ///
-    /// Он не умеет корректно работать с:
-    /// - eager replacement в живом кандидате;
-    /// - rollback-ом уже зафиксированных зубцов;
-    /// - частичным разрушением replacement-а.
+    /// 2. Потом идем справа налево, пока не исчерпаем заказанные забои:
+    ///    - либо съедаем свободный хвост, одинаковый в обеих досках;
+    ///    - либо разрушаем последний зубец:
+    ///         rollback(Before) -> стереть replacement ->
+    ///         восстановить surviving raw tail -> rollback(After).
     ///
-    /// Но пока оставляю его как отдельный слой следующей доработки,
-    /// а не мешаю сюда в один ком.
-    fn _apply_gboard_erase(&mut self, n: usize) {
-        let current_len = self._cutting_board.len();
-
-        let target_len = current_len.saturating_sub(n);
-        let actual_erase = current_len - target_len;
-
-        if actual_erase == 0 {
+    /// Важное следствие:
+    /// забой свободного хвоста не обязан убивать кандидата.
+    /// Это нужно для сценария:
+    ///     "точка с за" + "[2]запятой"
+    /// где кандидат должен пережить стирание хвоста "за" и дорасти до
+    /// "точка с запятой".
+    fn _apply_gboard_erase(&mut self, mut requested_erase: usize) {
+        if requested_erase == 0 || self._cutting_board.is_empty() {
             return;
         }
 
-        self._cutting_board.truncate(target_len);
-        self._franken_board.truncate(target_len);
+        // ---------------------------------------------------------------------
+        // Шаг 1. Судьба живого кандидата.
+        // ---------------------------------------------------------------------
 
-        self._trim_comb(target_len);
+        // Позиция в разделочной доске, до куда достигают забои.
+        let target_cb_len = self._cutting_board.len().saturating_sub(requested_erase);
 
-        self._screen_transfer_vec
-            .push(ScreenTransfer::Backspace(actual_erase));
+        enum _CandidateDestiny {
+            /// Кандидата не трогаем: забои его не достигают.
+            _Keep,
+
+            /// Кандидата расстрелять: забои его накрыли, а подстановка для него еще не нашлась.
+            _Drop,
+
+            /// Кандидат в `_ExactReady` уже несет подстановку.
+            /// Если забои достигают его exact-части, переносим его зубец в гребень,
+            /// чтобы дальше общий цикл обработал его как обычный последний зубец.
+            _CommitExactReadyToComb,
+        }   // _CandidateEraseReaction
+
+        // Определить судьбу.
+        let candidate_erase_reaction = match &self._candidate_position {
+            _CandidatePosition::_CandidateGrowing(candidate) => {
+                match candidate._status {
+                    _CandidateStatus::_ExactReady => {
+                        // exact-ready кандидат защищен до границы своего exact-зубца.
+                        // Если новый конец cutting_board уйдет левее cb_end,
+                        // значит подстановка захвачена забоями.
+                        if target_cb_len < candidate._prong._cb_end {
+                            _CandidateDestiny::_CommitExactReadyToComb
+                        } else {
+                            _CandidateDestiny::_Keep
+                        }
+                    }
+
+                    _CandidateStatus::_Partial => {
+                        // partial-кандидат можно сохранять, пока забои не достигли
+                        // самого начала кандидата.
+                        if target_cb_len < candidate._prong._cb_start {
+                            _CandidateDestiny::_Drop
+                        } else {
+                            _CandidateDestiny::_Keep
+                        }
+                    }
+                }   // match
+            }
+
+            // "Вакансия" после WordStart не несет собственного текста.
+            // Любой внешний erase считаем достаточным поводом её закрыть.
+            _CandidatePosition::_VacancyOpen => {
+                _CandidateDestiny::_Drop
+            }
+
+            _CandidatePosition::_None => {
+                _CandidateDestiny::_Keep
+            }
+        };   // match
+
+        // Исполнить.
+        match candidate_erase_reaction {
+            _CandidateDestiny::_Keep => {
+                // Ничего не делать.
+            }
+
+            _CandidateDestiny::_Drop => {
+                self._candidate_position = _CandidatePosition::_None;
+            }
+
+            _CandidateDestiny::_CommitExactReadyToComb => {
+                let candidate_position = std::mem::replace(
+                    &mut self._candidate_position,
+                    _CandidatePosition::_None,
+                );
+
+                let _CandidatePosition::_CandidateGrowing(candidate) = candidate_position else {
+                    unreachable!("candidate erase reaction diverged from candidate state");
+                };
+
+                debug_assert!(matches!(candidate._status, _CandidateStatus::_ExactReady));
+
+                // ВАЖНО:
+                // здесь мы НЕ откатываем подстановку.
+                // Мы только превращаем висящий eager-candidate в обычный последний зубец
+                // гребня. Ниже общий цикл сам решит:
+                // - сначала подчистить свободный хвост после зубца;
+                // - потом, если забои еще остались, разрушить сам зубец.
+                self._comb.push(candidate._prong);
+            }
+        }   // match
+
+        // ---------------------------------------------------------------------
+        // Шаг 2. Основной цикл забоев справа налево.
+        // ---------------------------------------------------------------------
+        while requested_erase > 0 && !self._cutting_board.is_empty() {
+            let current_cb_len = self._cutting_board.len();
+
+            // Проверить, упирается ли правый край cutting_board в последний зубец.
+            let end_is_covered_by_last_prong = match self._comb.last() {
+                Some(prong) => prong._cb_end == current_cb_len,
+                None => false,
+            };
+
+            if end_is_covered_by_last_prong {
+                // =============================================================
+                // Случай А. Правый край покрыт последним зубцом.
+                // Значит, свободного хвоста справа уже нет, и забои пришли
+                // непосредственно в подстановку.
+                // =============================================================
+                let prong = self._comb.pop()
+                    .expect("end_is_covered_by_last_prong implies non-empty comb");
+
+                debug_assert_eq!(prong._cb_end, current_cb_len);
+                debug_assert_eq!(prong._fb_end, self._franken_board.len());
+
+                // 1. Дополнительный rollback до разрушения replacement-а.
+                if let Some(rb) = prong._rollback_fn {
+                    rb(self, WhenApplied::Before);
+                }
+
+                // 2. Полностью стереть replacement из franken_board.
+                //
+                // Здесь стираем весь замещающий текст целиком, даже если
+                // заказанные забои покрывают только часть сырого ключа.
+                // Это ключевая идея алгоритма:
+                // частичное разрушение зубца = полный откат подстановки
+                // + восстановление surviving raw tail.
+                let replacement_len = self._franken_board.len() - prong._fb_start;
+                if replacement_len > 0 {
+                    self._franken_board.truncate(prong._fb_start);
+                    self._screen_transfer_vec
+                        .push(ScreenTransfer::Backspace(replacement_len));
+                }
+
+                // 3. Списать заказанные забои с сырого текста зубца.
+                let prong_raw_len = prong._cb_end - prong._cb_start;
+                let erase_now = requested_erase.min(prong_raw_len);
+
+                let new_cb_len = current_cb_len - erase_now;
+                self._cutting_board.truncate(new_cb_len);
+                requested_erase -= erase_now;
+
+                // 4. Восстановить surviving raw tail.
+                //
+                // Если зубец разрушен не полностью, то после удаления части сырого ключа
+                // надо вернуть оставшийся кусок во franken_board.
+                //
+                // Берем текст от начала зубца до нового конца cutting_board.
+                // После этого справа снова образуется обычный свободный хвост,
+                // идентичный в cutting_board и franken_board.
+                if new_cb_len > prong._cb_start {
+                    let surviving_raw_text: String =
+                        self._cutting_board[prong._cb_start..]
+                            .iter()
+                            .collect();
+
+                    if !surviving_raw_text.is_empty() {
+                        self._franken_board.extend(surviving_raw_text.chars());
+                        self._screen_transfer_vec
+                            .push(ScreenTransfer::Text(surviving_raw_text));
+                    }
+                }
+
+                // 5. Дополнительный rollback после восстановления сырого хвоста.
+                //
+                // Держим тот же порядок, что и в `_undo_exact_ready()`:
+                // rollback(Before) -> убрать replacement ->
+                // восстановить raw -> rollback(After)
+                if let Some(rb) = prong._rollback_fn {
+                    rb(self, WhenApplied::After);
+                }
+
+            } else {
+                // =============================================================
+                // Случай Б. Справа есть свободный хвост, не покрытый зубцом.
+                // Его текст одинаков и в cutting_board, и во franken_board.
+                // =============================================================
+
+                // Свободный хвост начинается сразу после последнего зубца.
+                // Если зубцов нет, хвост начинается с нуля.
+                let (free_tail_cb_start, free_tail_fb_start) = match self._comb.last() {
+                    Some(prong) => (prong._cb_end, prong._fb_end),
+                    None => (0, 0),
+                };
+
+                let free_tail_cb_len = self._cutting_board.len() - free_tail_cb_start;
+                let free_tail_fb_len = self._franken_board.len() - free_tail_fb_start;
+
+                // По контракту хвосты здесь должны быть идентичны и равны по длине.
+                debug_assert_eq!(free_tail_cb_len, free_tail_fb_len);
+
+                // Если сюда попали, свободный хвост должен существовать.
+                // В release-сборке на всякий случай выходим, чтобы не зациклиться.
+                if free_tail_cb_len == 0 {
+                    break;
+                }
+
+                let erase_now = requested_erase.min(free_tail_cb_len);
+
+                self._cutting_board
+                    .truncate(self._cutting_board.len() - erase_now);
+
+                self._franken_board
+                    .truncate(self._franken_board.len() - erase_now);
+
+                self._screen_transfer_vec
+                    .push(ScreenTransfer::Backspace(erase_now));
+
+                requested_erase -= erase_now;
+            }
+        }   // while
     }   // _apply_gboard_erase()
 
     /// Очищает разделочную доску при стабилизации потока.
