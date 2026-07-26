@@ -111,7 +111,7 @@ fn _lexer_frlab_to_screen_pipeline(chunks: &[&str]) {
 /// Правила:
 /// - `Text(s)` дописывает текст в конец буфера;
 /// - `Backspace(n)` удаляет `n` последних символов буфера.
-fn _process_transfers(transfers: &[ScreenTransfer]) -> String {
+fn _process_screen_transfers(transfers: &[ScreenTransfer]) -> String {
     let mut buffer = String::new();
 
     for transfer in transfers {

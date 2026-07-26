@@ -260,27 +260,10 @@ impl SurgeTable {
     pub(super) fn process_lexeme(&mut self, lexeme: &LexemeTransfer) {
         self._preprocess_employing_candidate(lexeme);
 
-        // --- Капитализация  ---
-        // Если флаг взведён и пришёл WordPart, капитализируем первый символ.
-        // Создаём новую лексему с изменённым текстом и подменяем ссылку.
-        let owned_lexeme: LexemeTransfer;
-        let effective_lexeme = if self.flag.capitalize_next_word {
-            if let LexemeTransfer::WordPart(text) = lexeme {
-                self.flag.capitalize_next_word = false;
-                let capitalized: String = Self::_capitalize_first_char(text);
-                owned_lexeme = LexemeTransfer::WordPart(capitalized);
-                &owned_lexeme
-            } else {
-                lexeme
-            }
-        } else {
-            lexeme
-        };
-
-        if let Some(text_lexeme) = Self::_extract_significant_text(effective_lexeme) {
+        if let Some(text_lexeme) = Self::_extract_significant_text(lexeme) {
             self._process_text_lexeme(&text_lexeme);
         } else {
-            self._process_service_lexeme(effective_lexeme);
+            self._process_service_lexeme(lexeme);
         }
     }   // process_lexeme()
 
@@ -806,10 +789,13 @@ impl SurgeTable {
             return;
         }
 
-        let chars: Vec<char> = text.chars().collect();
+        // Применяем капитализацию только для franken_board и экрана
+        let processed_text = self._capitalize_if_needed(text);
+
+        let chars: Vec<char> = processed_text.chars().collect();
         self._franken_board.extend_from_slice(&chars);
         self._screen_transfer_vec
-            .push(ScreenTransfer::Text(text.to_string()));
+            .push(ScreenTransfer::Text(processed_text));
         self._prune_if_needed();
     }   // _write_raw_text_to_franken_board()
 
@@ -1138,19 +1124,30 @@ impl SurgeTable {
         }   // match
     }   // _has_whitespace_before()
 
-    /// Капитализирует первый символ строки.
-    ///
-    /// Остальные символы остаются без изменений (они уже в lowercase после лексера).
-    fn _capitalize_first_char(s: &str) -> String {
-        let mut chars = s.chars();
-        match chars.next() {
-            None => String::new(),
-            Some(first) => {
-                let upper: String = first.to_uppercase().collect();
-                upper + chars.as_str()
+    /// Если взведен флаг `capitalize_next_word`, делает первую букву в тексте заглавной
+    /// и сбрасывает флаг. Если букв в тексте нет (пробелы, пунктуация), возвращает текст
+    /// без изменений и оставляет флаг взведенным.
+    fn _capitalize_if_needed(&mut self, text: &str) -> String {
+        if self.flag.capitalize_next_word {
+            if text.chars().any(|c| c.is_alphabetic()) {
+                let mut chars = Vec::new();
+                let mut capitalized = false;
+
+                for c in text.chars() {
+                    if !capitalized && c.is_alphabetic() {
+                        chars.extend(c.to_uppercase());
+                        capitalized = true;
+                    } else {
+                        chars.push(c);
+                    }
+                }
+
+                self.flag.capitalize_next_word = false;
+                return chars.into_iter().collect();
             }
         }
-    }   // _capitalize_first_char()
+        text.to_string()
+    }   // _capitalize_if_needed()
 
     /// Clears all state.
     fn _clear_all(&mut self) {

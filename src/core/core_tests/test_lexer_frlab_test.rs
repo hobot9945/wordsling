@@ -9,7 +9,7 @@
 #![cfg(test)]
 
 #[allow(unused_imports)] use hobolib::prln;
-use crate::core::core_tests::{_process_transfers, _dump_transfers, _lexer_frlab_pipeline, mission};
+use crate::core::core_tests::{_process_screen_transfers, _dump_transfers, _lexer_frlab_pipeline, mission};
 use crate::core::core_tests::mission::the_vacha_river;
 
 #[test]
@@ -18,7 +18,7 @@ fn debug_spec_phrase_through_lexer_and_frankenlab() {
     let (input, output) = the_vacha_river();
 
     let transfers = _lexer_frlab_pipeline(&input);
-    let final_text = _process_transfers(&transfers);
+    let final_text = _process_screen_transfers(&transfers);
 
     println!("{}", final_text);
 
@@ -36,8 +36,8 @@ fn parentheses() {
 
     let (input, output) = mission::parentheses();
 
-    let transfers = _lexer_frlab_pipeline(&input);
-    let final_text = _process_transfers(&transfers);
+    let screen_transfers = _lexer_frlab_pipeline(&input);
+    let final_text = _process_screen_transfers(&screen_transfers);
 
     println!("{}", final_text);
 
@@ -45,6 +45,6 @@ fn parentheses() {
         final_text,
         output,
         "Неожиданный поток ScreenTransfer:\n{}",
-        _dump_transfers(&transfers)
+        _dump_transfers(&screen_transfers)
     );
 }   // debug_spec_phrase_through_lexer_and_frankenlab()
