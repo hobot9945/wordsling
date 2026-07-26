@@ -1,66 +1,49 @@
 //! user_activity_tracker.rs — User activity monitoring.
 //!
-//! Monitors user input activity (mouse movements, keyboard presses)
-//! on the host machine to detect when the user manually interacts
-//! with the system.
-//!
-//! # RESPONSIBILITY
-//! - Track mouse and keyboard activity via OS-level hooks.
-//! - Set a shared activity flag when user input is detected.
-//! - Detect control key combinations (e.g., start/stop recognition).
-//!
-//! # CURRENT STATE
-//! Stub implementation. No actual monitoring is performed.
+//! Monitors user input activity (mouse clicks, keyboard presses)
+//! to detect when the user manually interacts with the system.
+//! Delegates platform-specific hooking to `hobolib`.
 
-use std::thread;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+
+use hobolib::user_activity::{spawn_activity_tracker, stop_activity_tracker};
+use crate::core::lexeme_transfer::LexemeTransfer;
 use crate::{log_err, log_inf};
 
 pub struct UserActivityTracker {
-    _handle: Option<thread::JoinHandle<()>>,
-}   // UserActivityTracker
+    _handle: Option<std::thread::JoinHandle<()>>,
+    thread_id: Arc<Mutex<u32>>,
+}
 
 impl UserActivityTracker {
 
-    /// Constructor.
-    ///
-    /// Spawns a worker thread for monitoring user activity.
-    /// Currently a stub — the thread does nothing and waits for shutdown.
-    pub fn new() -> Self {
+    pub fn new(lexeme_tx: Sender<LexemeTransfer>) -> Self {
 
-        let handle = thread::spawn(move || {
-            _tracker_loop();
+        let (handle, thread_id) = spawn_activity_tracker(move || {
+            let _ = lexeme_tx.send(LexemeTransfer::UserActivityDetected);
         });
 
         UserActivityTracker {
             _handle: Some(handle),
+            thread_id,
         }
-    }   // new()
-
-}   // impl UserActivityTracker
+    }
+}
 
 impl Drop for UserActivityTracker {
 
-    /// Destructor.
-    /// Waits for the worker thread to finish.
     fn drop(&mut self) {
+        if let Ok(tid_guard) = self.thread_id.lock() {
+            stop_activity_tracker(*tid_guard);
+        }
 
         if let Some(handle) = self._handle.take() {
             if let Err(panic_payload) = handle.join() {
                 log_err!("UserActivityTracker thread panicked: {:?}", panic_payload);
-            }   // if
-        }   // if
+            }
+        }
 
         log_inf!("UserActivityTracker thread dropped");
     }
-}   // impl Drop for UserActivityTracker
-
-/// Stub tracker loop.
-///
-/// In the future, this will install low-level keyboard and mouse hooks
-/// and run a Windows message loop (`GetMessage`) to receive events.
-///
-/// Currently does nothing. The thread will be kept alive by the
-/// blocking nature of the future message loop. For now, it simply returns.
-fn _tracker_loop() {
-    // TODO: Install WinAPI hooks and run GetMessage loop.
-}   // _tracker_loop()
+}

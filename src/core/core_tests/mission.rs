@@ -72,9 +72,8 @@ pub(super) fn the_vacha_river() -> (Vec<&'static str>, String) {
 }   // the_vacha_river()
 
 
-pub(super) fn parentheses() -> (Vec<&'static str>, String) {
+pub(super) fn parentheses_capitalization() -> (Vec<&'static str>, String) {
 
-    // Пример из technical_specification.md, раздел 5.10.
     let input = vec![
         "под", " скобка открывается", " со", "бо", "ю", " скобка закрывается", " но", "г",
         " скобка открывается", "[2]ся", " не", " скобка закрывается", "[2]ся", " чу", "я",
@@ -87,3 +86,18 @@ pub(super) fn parentheses() -> (Vec<&'static str>, String) {
     (input, output)
 
 }   // parantheses()
+
+pub(super) fn dot_capitalization() -> (Vec<&'static str>, String) {
+
+    // Проверяем составной modifier для "точка":
+    // - пробел перед replacement-ом должен исчезнуть;
+    // - следующее слово должно начаться с заглавной буквы.
+    let input = vec![
+        "при", "вет", " точ", "ка", " ми", "р",
+    ];
+
+    let output = String::from("Привет. Мир");
+
+    (input, output)
+
+}   // dot_capitalization()

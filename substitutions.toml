@@ -4,6 +4,11 @@ replacement = "."
 modifier = "capitalize_next_word"
 
 [[subs_vec]]
+key_phrases = ["точка"]
+replacement = "."
+modifier = "suppress_whitespace_before_and_capitalize_next_word"
+
+[[subs_vec]]
 key_phrases = [
     "левая скобка",
     "скобка открывается",
@@ -22,3 +27,23 @@ key_phrases = [
 ]
 replacement = ")"
 modifier = "suppress_whitespace_before"
+
+[[subs_vec]]
+key_phrases = ["с большой буквы", "capitalize"]
+replacement = ""
+modifier = "capitalize_next_word"
+
+[[subs_vec]]
+key_phrases = ["с маленькой буквы", "lowercase"]
+replacement = ""
+modifier = "lowercase_next_word"
+
+[[subs_vec]]
+key_phrases = ["пробел", "space"]
+replacement = " "
+modifier = "suppress_whitespace_before"
+
+[[subs_vec]]
+key_phrases = ["буквально", "literally"]
+replacement = ""
+modifier = "cancel_next_replacement"

@@ -1,4 +1,4 @@
-//! test_lexer_frlab_test.rs — Интеграционные тесты обработки текста.
+//! test_lexer_frlab_test.rs — интеграционные тесты обработки текста.
 //!
 //! Назначение:
 //! - проверять корректность работы механизма Eager Replacement;
@@ -32,9 +32,9 @@ fn debug_spec_phrase_through_lexer_and_frankenlab() {
 
 
 #[test]
-fn parentheses() {
+fn parentheses_and_capitalization() {
 
-    let (input, output) = mission::parentheses();
+    let (input, output) = mission::parentheses_capitalization();
 
     let screen_transfers = _lexer_frlab_pipeline(&input);
     let final_text = _process_screen_transfers(&screen_transfers);
@@ -48,3 +48,21 @@ fn parentheses() {
         _dump_transfers(&screen_transfers)
     );
 }   // debug_spec_phrase_through_lexer_and_frankenlab()
+
+#[test]
+fn dot_capitalization() {
+
+    let (input, output) = mission::dot_capitalization();
+
+    let screen_transfers = _lexer_frlab_pipeline(&input);
+    let final_text = _process_screen_transfers(&screen_transfers);
+
+    println!("{}", final_text);
+
+    assert_eq!(
+        final_text,
+        output,
+        "Неожиданный поток ScreenTransfer:\n{}",
+        _dump_transfers(&screen_transfers)
+    );
+}   // dot_capitalization()

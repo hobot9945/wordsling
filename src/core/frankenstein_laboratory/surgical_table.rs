@@ -44,13 +44,15 @@ pub(super) struct Prong {
 pub(super) struct Flag {
     pub(super) suppress_next_whitespace: bool,
     pub(super) capitalize_next_word: bool,
+    pub(super) cancel_next_replacement: bool,
 }
 
 impl Default for Flag {
     fn default() -> Self {
         Self {
-            suppress_next_whitespace: false,
-            capitalize_next_word: true, // По умолчанию первое слово с заглавной
+            suppress_next_whitespace: true,     // пробел перед первым словом не нужен
+            capitalize_next_word: true,         // по умолчанию первое слово с заглавной
+            cancel_next_replacement: false,
         }
     }
 }
@@ -61,8 +63,9 @@ impl Flag {
     }
 
     fn _clear(&mut self) {
-        self.suppress_next_whitespace = false;
+        self.suppress_next_whitespace = true;   // история очищена, значит разделение пробелом не нужно
         self.capitalize_next_word = false;
+        self.cancel_next_replacement = false;
     }
 }   // impl Flag
 
@@ -212,7 +215,7 @@ pub(super) struct SurgeTable {
     /// Текущее состояние автомата поиска фразового ключа.
     _candidate_position: _CandidatePosition,
 
-    pub(super) flag: Flag,
+    pub(super) flags: Flag,
 
     /// Карта подстановок.
     _subst_map: SubstitutionMap,
@@ -231,7 +234,7 @@ impl SurgeTable {
             _fb_rubicon: 0,
             _comb: Vec::new(),
             _candidate_position: _CandidatePosition::_None,
-            flag: Flag::new(),
+            flags: Flag::new(),
             _subst_map: SubstitutionMap::new(),
             _screen_transfer_vec: Vec::new(),
         }
@@ -258,6 +261,7 @@ impl SurgeTable {
     ///    - или сырой текст только в cutting_board, а во franken_board
     ///      уже замену.
     pub(super) fn process_lexeme(&mut self, lexeme: &LexemeTransfer) {
+
         self._preprocess_employing_candidate(lexeme);
 
         if let Some(text_lexeme) = Self::_extract_significant_text(lexeme) {
@@ -312,6 +316,18 @@ impl SurgeTable {
     /// может ли лексема открыть нового кандидата.
     fn _preprocess_employing_candidate(&mut self, lexeme: &LexemeTransfer) {
 
+        // Обработка флага отмены следующей подстановки (команда "буквально").
+        // Если флаг поднят, мы ждём лексему, способную открыть кандидата.
+        // Когда она приходит — гасим флаг и оставляем статус _None,
+        // чтобы текст ушёл в доски как сырой, без подстановки.
+        if self.flags.cancel_next_replacement {
+            if matches!(lexeme, LexemeTransfer::WordStart | LexemeTransfer::Punctuation(_)) {
+                self.flags.cancel_next_replacement = false;
+                self._candidate_position = _CandidatePosition::_None;
+                return;
+            }
+        }
+
         match lexeme {
 
             LexemeTransfer::WordStart => {
@@ -365,7 +381,7 @@ impl SurgeTable {
             }
 
         }   // match
-    }   // _preprocess_search_state()
+    }   // _preprocess_employing_candidate()
 
     /// Создает нового растущего кандидата, начиная с текущего хвоста обеих досок.
     fn _new_candidate(&mut self) -> _CandidatePosition {
@@ -398,8 +414,8 @@ impl SurgeTable {
     fn _process_text_lexeme(&mut self, lexeme_text: &str) {
 
         // Перехватчик подавления пробела
-        if self.flag.suppress_next_whitespace {
-            self.flag.suppress_next_whitespace = false;
+        if self.flags.suppress_next_whitespace {
+            self.flags.suppress_next_whitespace = false;
 
             if !lexeme_text.is_empty() && lexeme_text.chars().all(|c| c.is_whitespace()) {
                 // Пишем пробел только в сырую доску
@@ -466,7 +482,7 @@ impl SurgeTable {
         // он пустой (только образован), либо _ExactReady.
         match decision {
 
-            // Кандидата либо принимают в партию, либо расстреливают.
+            // Кандидата либо принимаем в партию, либо расстреливают.
             _SearchDecision::_NoMatch => {
                 // Новая лексема либо дисквалифицирует _Partial кандидата, либо завершает _ExactReady.
                 //
@@ -486,7 +502,7 @@ impl SurgeTable {
                 }
             }
 
-            // Кандидата либо оставляют пока в живых, либо, если он уже принят в партию в качестве
+            // Кандидата либо оставляем пока в живых, либо, если он уже принят в партию в качестве
             // исполняющего обязанности, намекают на возможность повышения (совпал с коротким вариантом
             // фразового ключа, выполнил подстановку, но еще может дорасти до более длинного варианта).
             _SearchDecision::_Partial => {
@@ -500,8 +516,8 @@ impl SurgeTable {
                 _CandidatePosition::_CandidateGrowing(candidate)
             }
 
-            // Кандидата либо принимают в партию в качестве исполняющего обязанности, либо продвигают
-            // выше. Но, оставляют исполняющим, намекая на возможность дальнейшего роста.
+            // Кандидата либо принимаем в партию в качестве исполняющего обязанности, либо продвигают
+            // выше. Но, оставляем исполняющим, намекая на возможность дальнейшего роста.
             _SearchDecision::_ExactReady {
                 _replacement_text,
                 _action,
@@ -1056,9 +1072,6 @@ impl SurgeTable {
                 let free_tail_cb_len = self._cutting_board.len() - free_tail_cb_start;
                 let free_tail_fb_len = self._franken_board.len() - free_tail_fb_start;
 
-                // По контракту хвосты здесь должны быть идентичны и равны по длине.
-                debug_assert_eq!(free_tail_cb_len, free_tail_fb_len);
-
                 // Если сюда попали, свободный хвост должен существовать.
                 debug_assert!(
                     free_tail_cb_len > 0,
@@ -1128,7 +1141,7 @@ impl SurgeTable {
     /// и сбрасывает флаг. Если букв в тексте нет (пробелы, пунктуация), возвращает текст
     /// без изменений и оставляет флаг взведенным.
     fn _capitalize_if_needed(&mut self, text: &str) -> String {
-        if self.flag.capitalize_next_word {
+        if self.flags.capitalize_next_word {
             if text.chars().any(|c| c.is_alphabetic()) {
                 let mut chars = Vec::new();
                 let mut capitalized = false;
@@ -1142,7 +1155,7 @@ impl SurgeTable {
                     }
                 }
 
-                self.flag.capitalize_next_word = false;
+                self.flags.capitalize_next_word = false;
                 return chars.into_iter().collect();
             }
         }
@@ -1153,8 +1166,9 @@ impl SurgeTable {
     fn _clear_all(&mut self) {
         self._cutting_board.clear();
         self._franken_board.clear();
+        self._fb_rubicon = 0;
         self._comb.clear();
-        self.flag._clear();
+        self.flags._clear();
         self._candidate_position = _CandidatePosition::_None;
     }   // _clear_all()
 

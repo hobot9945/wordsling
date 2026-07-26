@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use crate::core::frankenstein_laboratory::surgical_table::{Prong, SurgeTable};
 
+#[derive(Clone, Copy)]
 pub(super) enum WhenApplied {
     Before,
     After,
@@ -64,11 +65,35 @@ impl SupplementaryActionMap {
     pub(super) fn new() -> Self {
         let mut map = HashMap::new();
 
-        map.insert("do_nothing".to_string(), (do_nothing as SupplementaryAction, None));
-        map.insert("suppress_whitespace_before".to_string(),
-                   (suppress_whitespace_before as SupplementaryAction, None));
-        map.insert("suppress_whitespace_after".to_string(),
-                   (suppress_whitespace_after as SupplementaryAction, None));
+        map.insert(
+            "do_nothing".to_string(),
+            (do_nothing as SupplementaryAction, None),
+        );
+
+        map.insert(
+            "suppress_whitespace_before".to_string(),
+            (suppress_whitespace_before as SupplementaryAction, None),
+        );
+
+        // Подстановка поглощает пробел справа от replacement-а.
+        map.insert(
+            "suppress_whitespace_after".to_string(),
+            (
+                suppress_whitespace_after as SupplementaryAction,
+                Some(rollback_suppress_whitespace_after as SupplementaryRollback),
+            ),
+        );
+
+        // Поглощает пробелы с обеих сторон replacement-а.
+        map.insert(
+            "suppress_whitespace_before_and_after".to_string(),
+            (
+                suppress_whitespace_before_and_after as SupplementaryAction,
+                Some(rollback_suppress_whitespace_after as SupplementaryRollback),
+            ),
+        );
+
+        // Выводить следующее слово с заглавной буквы
         map.insert(
             "capitalize_next_word".to_string(),
             (
@@ -76,13 +101,42 @@ impl SupplementaryActionMap {
                 Some(rollback_capitalize_next_word as SupplementaryRollback),
             ),
         );
-        
+
+        // Сброс требования капитализации следующего слова.
+        map.insert(
+            "lowercase_next_word".to_string(),
+            (lowercase_next_word as SupplementaryAction, None),
+        );
+
+        // Комбинированный modifier для точки:
+        // - убрать пробел перед точкой;
+        // - поднять флаг капитализации следующего слова.
+        map.insert(
+            "suppress_whitespace_before_and_capitalize_next_word".to_string(),
+            (
+                suppress_whitespace_before_and_capitalize_next_word as SupplementaryAction,
+                Some(rollback_capitalize_next_word as SupplementaryRollback),
+            ),
+        );
+
+        // Отменяет следующую подстановку, то есть следующее слово не может рассматриваться как
+        // начало фразового ключа, и выводится на экран как обычный текст.
+        map.insert(
+            "cancel_next_replacement".to_string(),
+            (
+                cancel_next_replacement as SupplementaryAction,
+                Some(rollback_cancel_next_replacement as SupplementaryRollback),
+            ),
+        );
+
         SupplementaryActionMap {
             _map: map,
         }
     }   // new()
 
-    pub(super) fn get_pair(&self, key: &str) -> Option<(SupplementaryAction, Option<SupplementaryRollback>)> {
+    pub(super) fn get_pair(&self, key: &str)
+        -> Option<(SupplementaryAction, Option<SupplementaryRollback>)>
+    {
         self._map
             .get(key)
             .copied()
@@ -150,9 +204,35 @@ pub(super) fn suppress_whitespace_after(
     when_applied: WhenApplied,
 ) {
     if matches!(when_applied, WhenApplied::After) {
-        surge_table.flag.suppress_next_whitespace = true;
+        surge_table.flags.suppress_next_whitespace = true;
     }
 }   // suppress_whitespace_after()
+
+/// Откат подавления пробела после подстановки.
+pub(super) fn rollback_suppress_whitespace_after(
+    surge_table: &mut SurgeTable,
+    _prong: &mut Prong,
+    when_applied: WhenApplied,
+) {
+    if matches!(when_applied, WhenApplied::After) {
+        surge_table.flags.suppress_next_whitespace = false;
+    }
+}   // rollback_suppress_whitespace_after()
+
+/// Комбинированный modifier:
+/// - поглощает пробел перед replacement-ом;
+/// - подавляет пробел после replacement-а.
+///
+/// # Алгоритм
+/// Делегирует обе фазы соответствующим элементарным action-ам.
+pub(super) fn suppress_whitespace_before_and_after(
+    surge_table: &mut SurgeTable,
+    prong: &mut Prong,
+    when_applied: WhenApplied,
+) {
+    suppress_whitespace_before(surge_table, prong, when_applied);
+    suppress_whitespace_after(surge_table, prong, when_applied);
+}   // suppress_whitespace_before_and_after()
 
 /// Взводит флаг капитализации следующего слова.
 pub(super) fn capitalize_next_word(
@@ -161,7 +241,7 @@ pub(super) fn capitalize_next_word(
     when_applied: WhenApplied,
 ) {
     if matches!(when_applied, WhenApplied::After) {
-        surge_table.flag.capitalize_next_word = true;
+        surge_table.flags.capitalize_next_word = true;
     }
 }   // capitalize_next_word()
 
@@ -172,6 +252,66 @@ pub(super) fn rollback_capitalize_next_word(
     when_applied: WhenApplied,
 ) {
     if matches!(when_applied, WhenApplied::After) {
-        surge_table.flag.capitalize_next_word = false;
+        surge_table.flags.capitalize_next_word = false;
     }
 }   // rollback_capitalize_next_word()
+
+/// Сбрасывает требование капитализации следующего слова.
+///
+/// Полезно, когда за капитализирующей подстановкой (точка, восклицательный знак)
+/// идет слово, которое должно остаться строчным.
+/// Работает напрямую с флагом `capitalize_next_word`, не требуя отдельного состояния.
+/// Откат не реализован. Такое решение не абсолютно строго, но будет работать в большинстве случаев,
+/// поскольку, вывод с маленькой буквы - это нормальное поведение.
+pub(super) fn lowercase_next_word(
+    surge_table: &mut SurgeTable,
+    _prong: &mut Prong,
+    when_applied: WhenApplied,
+) {
+    if matches!(when_applied, WhenApplied::After) {
+        surge_table.flags.capitalize_next_word = false;
+    }
+}   // decapitalize_next_word()
+
+/// Комбинированный modifier:
+/// - поглощает пробел перед replacement-ом;
+/// - взводит капитализацию следующего слова.
+///
+/// # Алгоритм
+/// На фазе `Before` делегирует работу `suppress_whitespace_before()`.
+/// На фазе `After` делегирует работу `capitalize_next_word()`.
+/// В лишних фазах вложенные функции сами ничего не делают.
+pub(super) fn suppress_whitespace_before_and_capitalize_next_word(
+    surge_table: &mut SurgeTable,
+    prong: &mut Prong,
+    when_applied: WhenApplied,
+) {
+    suppress_whitespace_before(surge_table, prong, when_applied.clone());
+    capitalize_next_word(surge_table, prong, when_applied);
+}   // suppress_whitespace_before_and_capitalize_next_word()
+
+/// Взводит флаг отмены следующей подстановки.
+///
+/// Предназначен для будущей голосовой команды "буквально":
+/// после её распознания ближайшее совпадение с ключевой фразой
+/// должно быть пропущено, а сырой текст — выведен как есть.
+pub(super) fn cancel_next_replacement(
+    surge_table: &mut SurgeTable,
+    _prong: &mut Prong,
+    when_applied: WhenApplied,
+) {
+    if matches!(when_applied, WhenApplied::After) {
+        surge_table.flags.cancel_next_replacement = true;
+    }
+}   // cancel_next_replacement()
+
+/// Откат: снимает флаг отмены следующей подстановки.
+pub(super) fn rollback_cancel_next_replacement(
+    surge_table: &mut SurgeTable,
+    _prong: &mut Prong,
+    when_applied: WhenApplied,
+) {
+    if matches!(when_applied, WhenApplied::After) {
+        surge_table.flags.cancel_next_replacement = false;
+    }
+}   // rollback_cancel_next_replacement()
