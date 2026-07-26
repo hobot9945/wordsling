@@ -319,7 +319,7 @@ impl _Debouncer {
         }   // if
 
         // Заглушка для трекера активности, чтобы не поймать собственные Backspace
-        hobolib::glob::suppress_input_tracking(150);
+        hobolib::user_activity::suppress_input_tracking(150);
 
         // Step 3: emit real backspace keystrokes to the OS.
         for _ in 0..count {
@@ -384,7 +384,7 @@ impl _Debouncer {
         }   // if
 
         // Заглушка для трекера активности, чтобы не поймать собственный Ctrl+V
-        hobolib::glob::suppress_input_tracking(150);
+        hobolib::user_activity::suppress_input_tracking(150);
 
         if let Err(e) = send_ctrl_v() {
             log_err!("Debouncer: Ctrl+V failed: {}", e)
