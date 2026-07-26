@@ -44,6 +44,11 @@ replacement = " "
 modifier = "suppress_whitespace_before"
 
 [[subs_vec]]
+key_phrases = ["убрать блок", "erase block"]
+replacement = ""
+modifier = "suppress_whitespace_before"
+
+[[subs_vec]]
 key_phrases = ["буквально", "literally"]
 replacement = ""
 modifier = "cancel_next_replacement"

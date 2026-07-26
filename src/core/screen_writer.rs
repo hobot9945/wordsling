@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use hobolib::clipboard::{get_clipboard_text, set_clipboard_text};
 use hobolib::keyboard::{send_backspace, send_ctrl_v};
-use crate::{log_err, log_inf};
+use crate::{glob, log_err, log_inf};
 use crate::core::screen_transfer::ScreenTransfer;
 
 /// Cooldown interval between consecutive paste operations (Ctrl+V).
@@ -244,7 +244,7 @@ impl _Debouncer {
         if let Err(e) = set_clipboard_text(&self._text_buf) {
             log_err!("Debouncer: clipboard update failed: {}", e);
         }   // if
-
+if glob::DEBUG_TRACE {_track_clipboard_write()}; // <--- Добавить
         // Calculate remaining time until the cooldown allows a new paste.
         let time_to_flush = self._calculate_remaining_cooldown();
 
@@ -274,6 +274,7 @@ impl _Debouncer {
         let buf_char_len = self._text_buf.chars().count();
 
         if count <= buf_char_len {
+
             // Remove 'count' characters safely handling UTF-8 boundaries.
             for _ in 0..count {
                 self._text_buf.pop();
@@ -285,10 +286,11 @@ impl _Debouncer {
             // Instead, we return the remaining cooldown. The event loop will wait it out,
             // fire a Timeout, and call _flush() which will safely restore the clipboard.
             if self._text_buf.is_empty() {
-                if self._saved_clipboard_text.is_some() {
-                    return Some(self._calculate_remaining_cooldown());
+
+                return if self._saved_clipboard_text.is_some() {
+                    Some(self._calculate_remaining_cooldown())
                 } else {
-                    return None;
+                    None
                 }   // if
             }   // if
 
@@ -296,9 +298,11 @@ impl _Debouncer {
             if let Err(e) = set_clipboard_text(&self._text_buf) {
                 log_err!("Debouncer: clipboard update failed: {}", e);
             }   // if
+if glob::DEBUG_TRACE {_track_clipboard_write()}; // <--- Добавить
 
             // Ensure the OS has time to assimilate the new clipboard state.
             let time_to_flush = self._calculate_remaining_cooldown();
+
             return Some(if time_to_flush < _CLIPBOARD_ASSIMILATION_MS {
                 _CLIPBOARD_ASSIMILATION_MS
             } else {
@@ -320,11 +324,7 @@ impl _Debouncer {
 
         // Заглушка для трекера активности, чтобы не поймать собственные Backspace
         hobolib::user_activity::suppress_input_tracking(150);
-
-        // Step 3: emit real backspace keystrokes to the OS.
-        for _ in 0..count {
-
-        }
+if glob::DEBUG_TRACE {_print_backspaces(count);} // <--- Вставлена трассировка
         // Step 3: emit real backspace keystrokes to the OS.
         for _ in 0..count {
             if let Err(e) = send_backspace() {
@@ -385,6 +385,7 @@ impl _Debouncer {
 
         // Заглушка для трекера активности, чтобы не поймать собственный Ctrl+V
         hobolib::user_activity::suppress_input_tracking(150);
+if glob::DEBUG_TRACE {_print_paste(&self._text_buf);} // <--- Вставлена трассировка
 
         if let Err(e) = send_ctrl_v() {
             log_err!("Debouncer: Ctrl+V failed: {}", e)
@@ -420,7 +421,7 @@ impl _Debouncer {
 
     /// Ends the current clipboard paste session.
     ///
-    /// If there is a saved clipboard string and it is not empty, it restores it
+    /// If there is a saved clipboard string, and it is not empty, it restores it
     /// back to the system clipboard. The session is deactivated by `take()`.
     fn _finish_clipboard_session(&mut self) {
 
@@ -433,3 +434,64 @@ impl _Debouncer {
         }   // if
     }   // _finish_clipboard_session()
 }   // impl _Debouncer
+
+// =============================================================================
+// Trace Helpers
+// =============================================================================
+
+use std::cell::RefCell;
+use std::time::SystemTime;
+
+thread_local! {
+    static LAST_SCREEN_WRITE: RefCell<Option<Instant>> = RefCell::new(None);
+    static LAST_CLIPBOARD_WRITE: RefCell<Option<Instant>> = RefCell::new(None);
+}
+
+/// Форматирует текущее время в строку вида HH:MM:SS.mmm (в UTC).
+/// Используется для трассировки, чтобы не тянуть зависимость chrono.
+fn _current_time_str() -> String {
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs();
+    let ms = now.subsec_millis();
+    format!("{:02}:{:02}:{:02}.{:03}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60, ms)
+}
+
+/// Фиксирует время последней записи в системный карман.
+/// Вызывается сразу после успешного set_clipboard_text().
+fn _track_clipboard_write() {
+    LAST_CLIPBOARD_WRITE.with(|last| {
+        *last.borrow_mut() = Some(Instant::now());
+    });
+}
+
+/// Выводит трассировочную информацию о реальных забоях, отправленных в ОС.
+fn _print_backspaces(n: usize) {
+    let now = Instant::now();
+    let delta_str = LAST_SCREEN_WRITE.with(|last| {
+        let delta = last.borrow().map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0);
+        *last.borrow_mut() = Some(now);
+        let prefix = if delta < _COOLDOWN_MS.as_secs_f64() { "!!! " } else { "" };
+        format!("{}{:.3}s", prefix, delta)
+    });
+    println!("[{}: {}] [{}]", _current_time_str(), delta_str, n);
+}   // _print_backspaces()
+
+/// Выводит трассировочную информацию о тексте, отправленном на экран через Ctrl+V.
+fn _print_paste(text: &str) {
+    let now = Instant::now();
+    let screen_delta_str = LAST_SCREEN_WRITE.with(|last| {
+        let delta = last.borrow().map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0);
+        *last.borrow_mut() = Some(now);
+        let prefix = if delta < _COOLDOWN_MS.as_secs_f64() { "!!! " } else { "" };
+        format!("{}{:.3}s", prefix, delta)
+    });
+
+    let cb_delta_str = LAST_CLIPBOARD_WRITE.with(|last| {
+        let delta = last.borrow().map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0);
+        let prefix = if delta < _CLIPBOARD_ASSIMILATION_MS.as_secs_f64() { "!!! " } else { "" };
+        format!("{}{:.3}s", prefix, delta)
+    });
+
+    // Формат: [текущее время: интервал с прошлого вывода на экран: интервал с последней записи в карман] "текст"
+    println!("[{}: {}: {}] {:?}", _current_time_str(), screen_delta_str, cb_delta_str, text);
+}   // _print_paste()

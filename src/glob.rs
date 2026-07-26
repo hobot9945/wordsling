@@ -10,6 +10,8 @@ use hobolib::log::Log;
 use crate::glob::conf_toml::CONFIG;
 use crate::glob::log::_LOG;
 
+pub(crate) const DEBUG_TRACE: bool = true;
+
 /// Initializes global application states.
 ///
 /// Calling this function forces the configuration to be read from disk
