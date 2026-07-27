@@ -17,21 +17,23 @@
 mod lexeme_transfer;
 mod lexer;
 mod screen_transfer;
-mod screen_writer;
+mod screen_paster;
 mod user_activity_tracker;
 mod frankenstein_laboratory;
 mod core_tests;
+mod screen_typer;
 
 use std::sync::mpsc;
 use hobolib::prntln;
 use lexeme_transfer::LexemeTransfer;
 use lexer::Lexer;
 use crate::log_inf;
-use screen_writer::ScreenWriter;
+use screen_paster::ScreenPaster;
 use crate::tcp_server::TcpServer;
 use user_activity_tracker::UserActivityTracker;
 use screen_transfer::ScreenTransfer;
 use crate::core::frankenstein_laboratory::FrankenLab;
+use crate::core::screen_typer::ScreenTyper;
 
 pub struct Core {
     // Pipeline stages are stored in order.
@@ -40,7 +42,7 @@ pub struct Core {
     _tcp_server: TcpServer,
     _lexer: Lexer,
     _text_processor: FrankenLab,
-    _screen_writer: ScreenWriter,
+    _screen_writer: ScreenTyper,
     _user_activity_tracker: UserActivityTracker,
 }
 
@@ -69,7 +71,7 @@ impl Core {
         let tcp_server = TcpServer::new(text_tx);
         let lexer = Lexer::new(text_rx, lexeme_transfer_tx.clone());
         let text_processor = FrankenLab::new(lexeme_transfer_rx, screen_transfer_tx);
-        let screen_writer = ScreenWriter::new(screen_transfer_rx);
+        let screen_writer = ScreenTyper::new(screen_transfer_rx);
 
         // Spawn independent tracker.
         let user_activity_tracker = UserActivityTracker::new(lexeme_transfer_tx);

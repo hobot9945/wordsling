@@ -10,7 +10,7 @@ use hobolib::log::Log;
 use crate::glob::conf_toml::CONFIG;
 use crate::glob::log::_LOG;
 
-pub(crate) const DEBUG_TRACE: bool = true;
+// pub(crate) const DEBUG_TRACE: bool = false;
 
 /// Initializes global application states.
 ///

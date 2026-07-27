@@ -1,4 +1,4 @@
-//! screen_writer.rs — Screen output manager.
+//! screen_paster — Screen output manager.
 //!
 //! Receives text output and erase events (commands) from the text processor. Outputs text to the focused
 //! Windows application using clipboard paste. To avoid spamming paste keystrokes, a debouncing
@@ -16,6 +16,7 @@
 //! - Execute backspaces by first consuming the local buffer, then emitting real keystrokes.
 //! - Preserve the user's clipboard content across paste sessions.
 //! - Contain no protocol parsing or text interpretation logic.
+#![allow(unused)]
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
@@ -26,7 +27,7 @@ use crate::{glob, log_err, log_inf};
 use crate::core::screen_transfer::ScreenTransfer;
 
 /// Cooldown interval between consecutive paste operations (Ctrl+V).
-const _COOLDOWN_MS: Duration = Duration::from_millis(100);
+const _COOLDOWN_MS: Duration = Duration::from_millis(200);
 
 /// Minimum delay between consecutive backspace keystrokes sent to the OS.
 ///
@@ -40,12 +41,12 @@ const _BACKSPACE_DELAY_MS: Duration = Duration::from_millis(0);
 /// Minimum delay required between updating the clipboard and pasting.
 const _CLIPBOARD_ASSIMILATION_MS: Duration = Duration::from_millis(20);
 
-pub struct ScreenWriter {
+pub struct ScreenPaster {
     // Thread handle. Used during shutdown to perform join() from the main thread.
     _handle: Option<thread::JoinHandle<()>>,
 }   // ScreenWriter
 
-impl ScreenWriter {
+impl ScreenPaster {
 
     /// Constructor.
     ///
@@ -60,7 +61,7 @@ impl ScreenWriter {
             Self::_screen_writer_loop(write_cmd_rx);
         });
 
-        ScreenWriter {
+        ScreenPaster {
             _handle: Some(handle),
         }
     }   // new()
@@ -125,7 +126,7 @@ impl ScreenWriter {
     }   // _screen_writer_loop()
 }   // impl ScreenWriter
 
-impl Drop for ScreenWriter {
+impl Drop for ScreenPaster {
 
     /// Destructor.
     /// Waits for the worker thread to finish and checks for panics.
@@ -244,7 +245,7 @@ impl _Debouncer {
         if let Err(e) = set_clipboard_text(&self._text_buf) {
             log_err!("Debouncer: clipboard update failed: {}", e);
         }   // if
-if glob::DEBUG_TRACE {_track_clipboard_write()}; // <--- Добавить
+// if glob::DEBUG_TRACE {_track_clipboard_write()}; // <--- Добавить
         // Calculate remaining time until the cooldown allows a new paste.
         let time_to_flush = self._calculate_remaining_cooldown();
 
@@ -298,7 +299,7 @@ if glob::DEBUG_TRACE {_track_clipboard_write()}; // <--- Добавить
             if let Err(e) = set_clipboard_text(&self._text_buf) {
                 log_err!("Debouncer: clipboard update failed: {}", e);
             }   // if
-if glob::DEBUG_TRACE {_track_clipboard_write()}; // <--- Добавить
+// if glob::DEBUG_TRACE {_track_clipboard_write()}; // <--- Добавить
 
             // Ensure the OS has time to assimilate the new clipboard state.
             let time_to_flush = self._calculate_remaining_cooldown();
@@ -324,7 +325,7 @@ if glob::DEBUG_TRACE {_track_clipboard_write()}; // <--- Добавить
 
         // Заглушка для трекера активности, чтобы не поймать собственные Backspace
         hobolib::user_activity::suppress_input_tracking(150);
-if glob::DEBUG_TRACE {_print_backspaces(count);} // <--- Вставлена трассировка
+// if glob::DEBUG_TRACE {_print_backspaces(count);} // <--- Вставлена трассировка
         // Step 3: emit real backspace keystrokes to the OS.
         for _ in 0..count {
             if let Err(e) = send_backspace() {
@@ -385,7 +386,7 @@ if glob::DEBUG_TRACE {_print_backspaces(count);} // <--- Вставлена тр
 
         // Заглушка для трекера активности, чтобы не поймать собственный Ctrl+V
         hobolib::user_activity::suppress_input_tracking(150);
-if glob::DEBUG_TRACE {_print_paste(&self._text_buf);} // <--- Вставлена трассировка
+// if glob::DEBUG_TRACE {_print_paste(&self._text_buf);} // <--- Вставлена трассировка
 
         if let Err(e) = send_ctrl_v() {
             log_err!("Debouncer: Ctrl+V failed: {}", e)

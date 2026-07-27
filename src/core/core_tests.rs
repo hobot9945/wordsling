@@ -61,7 +61,7 @@ fn _lexer_frlab_pipeline(chunks: &[&str]) -> Vec<ScreenTransfer> {
 
 use std::thread;
 use std::time::Duration;
-use crate::core::screen_writer::ScreenWriter;
+use crate::core::screen_paster::ScreenPaster;
 
 /// Прогоняет текстовые чанки через ПОЛНЫЙ пайплайн вплоть до реального экрана.
 ///
@@ -79,7 +79,7 @@ fn _lexer_frlab_to_screen_pipeline(chunks: &[&str]) {
     // 2. Поднимаем все потоки, включая ScreenWriter
     let lexer = Lexer::new(text_rx, lexeme_tx);
     let franken = FrankenLab::new(lexeme_rx, screen_tx);
-    let screen_writer = ScreenWriter::new(screen_rx);
+    let screen_writer = ScreenPaster::new(screen_rx);
 
     // 3. ПАУЗА ДЛЯ БЕЗОПАСНОСТИ!
     // Даем 3 секунды, чтобы ты успел кликнуть в окно Блокнота/Telegram.
