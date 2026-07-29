@@ -102,7 +102,7 @@ replacement = " "
 modifier = "suppress_whitespace_before"
 
 [[subs_vec]]
-key_phrases = ["убрать блок", "erase block"]
+key_phrases = ["убери блок", "erase block"]
 replacement = ""
 modifier = "suppress_whitespace_before"
 

@@ -13,7 +13,7 @@ import kotlinx.coroutines.channels.Channel
 */
 
 // Порог числа символов в поле ввода, после которого разрешается очистка
-const val INPUT_CLEAR_THRESHOLD = 300
+const val INPUT_CLEAR_THRESHOLD = 512
 
 // Порог молчания (мс), после которого инициируется очистка поля ввода
 const val INPUT_SILENCE_THRESHOLD = 3000L

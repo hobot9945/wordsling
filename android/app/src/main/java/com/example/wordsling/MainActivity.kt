@@ -136,8 +136,8 @@ class MainActivity : AppCompatActivity() {
 
                 // Применяем дельту к журналу, если она есть
                 if (delta.isNotEmpty()) {
-//                    _applyDelta(_logTextView, delta)
-                    _logTextView.text = "${_logTextView.text}${delta}"
+                    _applyDelta(_logTextView, delta)
+//                    _logTextView.text = "${_logTextView.text}${delta}"
                     _tcpClient.send(delta)
                 }
 
