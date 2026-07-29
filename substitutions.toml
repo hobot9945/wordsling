@@ -1,12 +1,52 @@
 [[subs_vec]]
-key_phrases = ["."]
-replacement = "."
-modifier = "capitalize_next_word"
-
-[[subs_vec]]
 key_phrases = ["точка"]
 replacement = "."
 modifier = "suppress_whitespace_before_and_capitalize_next_word"
+
+[[subs_vec]]
+key_phrases = ["вопросительный знак"]
+replacement = "?"
+modifier = "suppress_whitespace_before_and_capitalize_next_word"
+
+[[subs_vec]]
+key_phrases = ["восклицательный знак"]
+replacement = "!"
+modifier = "suppress_whitespace_before_and_capitalize_next_word"
+
+[[subs_vec]]
+key_phrases = ["запятая"]
+replacement = ","
+modifier = "suppress_whitespace_before"
+
+[[subs_vec]]
+key_phrases = ["точка с запятой"]
+replacement = ";"
+modifier = "suppress_whitespace_before"
+
+[[subs_vec]]
+key_phrases = ["двоеточие"]
+replacement = ":"
+modifier = "suppress_whitespace_before"
+
+[[subs_vec]]
+key_phrases = ["новая строка"]
+replacement = "\n"
+modifier = "suppress_whitespace_before_and_after"
+
+[[subs_vec]]
+key_phrases = ["слэш"]
+replacement = "/"
+modifier = "suppress_whitespace_before_and_after"
+
+[[subs_vec]]
+key_phrases = ["диез"]
+replacement = "#"
+modifier = "suppress_whitespace_before"
+
+[[subs_vec]]
+key_phrases = ["тире"]
+replacement = "-"
+modifier = "do_nothing"
 
 [[subs_vec]]
 key_phrases = [
@@ -26,6 +66,24 @@ key_phrases = [
     "close parenthesis",
 ]
 replacement = ")"
+modifier = "suppress_whitespace_before"
+
+[[subs_vec]]
+key_phrases = [
+    "левая квадратная скобка",
+    "квадратная скобка открывается",
+    "квадратная открывающая скобка",
+]
+replacement = "["
+modifier = "suppress_whitespace_after"
+
+[[subs_vec]]
+key_phrases = [
+    "правая квадратная скобка",
+    "квадратная скобка закрывается",
+    "квадратная закрывающая скобка",
+]
+replacement = "]"
 modifier = "suppress_whitespace_before"
 
 [[subs_vec]]
@@ -52,3 +110,13 @@ modifier = "suppress_whitespace_before"
 key_phrases = ["буквально", "literally"]
 replacement = ""
 modifier = "cancel_next_replacement"
+
+[[subs_vec]]
+key_phrases = ["замри"]
+replacement = ""
+modifier = "disable_output"
+
+[[subs_vec]]
+key_phrases = ["слушай товарищ", "компьютер", "слушай компьютер"]
+replacement = ""
+modifier = "enable_output"

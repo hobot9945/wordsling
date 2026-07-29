@@ -1,5 +1,7 @@
 //! screen_paster — Screen output manager.
 //!
+//! Similar to screen_typer.rs, but uses clipboard pasting instead of key emulation.
+//!
 //! Receives text output and erase events (commands) from the text processor. Outputs text to the focused
 //! Windows application using clipboard paste. To avoid spamming paste keystrokes, a debouncing
 //! mechanism is applied. Erasings are executed by emulating Backspace key presses with fixed

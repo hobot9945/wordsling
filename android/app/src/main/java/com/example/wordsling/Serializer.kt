@@ -20,11 +20,11 @@ import android.view.inputmethod.BaseInputConnection
 *
 * # Протокол wordsling
 * Формирует строку дельты, описывающую изменение текста относительно предыдущей итерации.
-* Формат дельты: `[*][N]текст`
+* Формат дельты: `[*]\[N\]текст`
 * - `*` (стабилизация): ставится в начало, если зафиксировано изменение позиции композитного спана.
 *   Сигнализирует серверу, что предыдущий текст стабилизирован и не будет изменяться последующими
 * дельтами.
-* - `[N]` (забои): указывает количество символов N для удаления с конца текущего текста.
+* - `\[N\]` (забои): указывает количество символов N для удаления с конца текущего текста.
 * Опускается, если удаления нет.
 * - `текст`: символы для добавления в конец текста после забоев. Опускается, если добавления нет.
 * Если изменений нет, дельта пустая.
@@ -34,7 +34,7 @@ import android.view.inputmethod.BaseInputConnection
 * - Отслеживание состояния композиции (gboard).
 * - Формирование строки дельты по протоколу wordsling.
 */
-class TextProcessor {
+class Serializer {
 
     // Опорный текст прошлой итерации. Это весь текст поля ввода. Но, при расчете дельты нас будет
     // интересовать только его композитная часть, весь текст до нее считаем стабильным.
@@ -75,7 +75,7 @@ class TextProcessor {
      * - обновляет `compositionFlag`;
      * - обновляет `delta`.
      */
-    fun takeText(s: Editable): TextProcessor {
+    fun takeText(s: Editable): Serializer {
 
         // Индекс начала композитной части. Если она есть, индекс >= 0.
         val spanStartInd = BaseInputConnection.getComposingSpanStart(s)
@@ -87,18 +87,25 @@ class TextProcessor {
         // Если идет композиция, изменяется только часть от начала спана.
         // Иначе сравниваем строки целиком (индекс = 0), что корректно отрабатывает и удаления.
         val mutableInd = if (compositionFlag) spanStartInd.coerceIn(0, s.length) else 0
-Log.d("TextProcessor", "spanStartInd: $spanStartInd, mutableInd: $mutableInd, s: $s")
+//Log.d("TextProcessor", "spanStartInd: $spanStartInd, mutableInd: $mutableInd, s: $s")
 
-        // Новый вариант изменяемой части.
+        // Новый вариант изменяемой части в сыром виде.
         val newString = s.toString().substring(mutableInd)
 
-        // Опорный вариант изменяемой части.
+        // Опорный вариант изменяемой части в сыром виде.
         // Защита от выхода индекса за пределы старой строки, если спан сместился вправо.
         val refString =
             if (mutableInd > _referenceText.length) "" else _referenceText.substring(mutableInd)
 
-        // Новая дельта. Если прошлый текст стабилизирован, ставим префикс `*` без разделяющих пробелов
-        delta = _extractDelta(newString, refString)
+        // Нормализуем обе строки перед вычислением дельты.
+        // Это важно:
+        // - состав протокола должен считаться уже в "серверной" форме;
+        // - при этом опорный текст и индексы композиции остаются сырыми, от Gboard.
+        val normalizedNewString = _convertToLowercaseAndDepunctuate(newString)
+        val normalizedRefString = _convertToLowercaseAndDepunctuate(refString)
+
+        // Вычисляем дельту уже по нормализованным строкам.
+        delta = _extractDelta(normalizedNewString, normalizedRefString)
 
         // Установить маркеры стабилизации
         _setStabilizationMarkers(spanStartInd, delta.isEmpty())
@@ -106,7 +113,7 @@ Log.d("TextProcessor", "spanStartInd: $spanStartInd, mutableInd: $mutableInd, s:
 
         _refSpanStartInd = spanStartInd
 
-Log.d("TextProcessor", "delta: $delta, newString: $newString, refString: $refString")
+//Log.d("TextProcessor", "delta: $delta, newString: $newString, refString: $refString")
 
         // Обновляем опорный текст для следующей итерации
         _referenceText = s.toString()
@@ -122,8 +129,8 @@ Log.d("TextProcessor", "delta: $delta, newString: $newString, refString: $refStr
      * - определяет, сколько символов нужно удалить с конца опорной строки;
      * - определяет, какой хвост нужно дописать.
      *
-     * Формат результата: `[N]текст`.
-     * Если удаления нет, префикс `[N]` опускается.
+     * Формат результата: `\[N\]текст`.
+     * Если удаления нет, префикс `\[N\]` опускается.
      * Если добавления нет, текстовая часть опускается.
      * Если изменений нет совсем, возвращается пустая строка.
      *
@@ -205,14 +212,12 @@ Log.d("TextProcessor", "delta: $delta, newString: $newString, refString: $refStr
      * Обработка посимвольная. После замены множественные пробелы
      * схлопываются в один.
      *
-     * Метод пока не используется и оставлен как заготовка для возможной
-     * серверной нормализации текста.
-     *
      * @param str исходная строка.
      * @return строка в нижнем регистре с замененной пунктуацией
      * и нормализованными пробелами.
      */
     private fun _convertToLowercaseAndDepunctuate(str: String): String {
+
         // 1. Преобразуем в нижний регистр, мапим символы через карту замен, собираем обратно
         val processedStr = str
             .lowercase()
@@ -230,7 +235,7 @@ Log.d("TextProcessor", "delta: $delta, newString: $newString, refString: $refStr
     private val _punctuationMap: HashMap<String, String> = hashMapOf(
         "." to " точка",
         "," to " запятая",
-        "\n" to " новая строка ",   // есть хвостовой пробел, перевод строки немножко особенный символ
+        "\n" to " новая строка ",   // перевод строки подавляет пробел перед следующим словом
         ";" to " точка с запятой",
         ":" to " двоеточие",
         "?" to " вопросительный знак",
@@ -238,8 +243,9 @@ Log.d("TextProcessor", "delta: $delta, newString: $newString, refString: $refStr
         "#" to " диез ",            // некоторые символы gboard не отделяет пробелом
         "/" to " слэш ",            // некоторые символы gboard не отделяет пробелом
         "'" to " апостроф",         // некоторые символы gboard не отделяет пробелом
-        "@" to " собака ",
         "-" to " тире ",            // образует множественные пробелы: "как-то" vs "они - козлы"
+        "[" to "квадратная открывающая скобка ",
+        "]" to " квадратная закрывающая скобка",
     )
 
     /**
