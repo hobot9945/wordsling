@@ -35,6 +35,10 @@ class TcpClient(
     private val context: Context,
     private val scope: CoroutineScope
 ) {
+    // Текущий сокет. Используется для принудительного закрытия при reconnect.
+    @Volatile
+    private var _socket: Socket? = null
+
     // Канал для отправки строк в корутину записи
     private val _sendChannel = Channel<String>(Channel.UNLIMITED)
 
@@ -92,13 +96,14 @@ class TcpClient(
      *
      * Блокирует корутину до тех пор, пока соединение активно.
      * При ошибке чтения/записи выбрасывает исключение, что приводит к реконнекту.
-     * Ресурсы сокета и потоков управляются автоматически через `use`.
+     * Ресурсы сокета и потоков освобождаются автоматически через `use`.
      *
      * Используется `coroutineScope`, чтобы исключение в корутине чтения (`readJob`)
      * отменяло корутину записи и пробрасывалось наверх в `start()`, а не валило `lifecycleScope`.
      */
     private suspend fun connectAndProcess() = coroutineScope {
         Socket().use { socket ->
+            _socket = socket
             socket.connect(InetSocketAddress(SERVER_IP, SERVER_PORT), 5000)
             _showToast("Подключено к серверу")
 
@@ -124,8 +129,22 @@ class TcpClient(
                     readJob.cancelAndJoin()
                 } // use (reader)
             } // use (writer)
+
+            _socket = null
         } // use (socket)
     } // connectAndProcess()
+
+    /**
+     * Принудительно сбрасывает текущее соединение.
+     *
+     * Закрытие сокета вызовет IOException в корутинах чтения/записи,
+     * что приведёт к штатному реконнекту в цикле start().
+     */
+    fun reconnect() {
+        try {
+            _socket?.close()
+        } catch (_: IOException) {}
+    } // reconnect()
 
     /**
      * Показывает Toast на главном потоке.

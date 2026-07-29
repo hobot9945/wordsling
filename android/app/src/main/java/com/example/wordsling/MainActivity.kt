@@ -1,10 +1,14 @@
 package com.example.wordsling
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.Editable
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.text.method.ScrollingMovementMethod
 import android.view.WindowManager
@@ -17,7 +21,10 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.example.wordsling.databinding.ActivityMainBinding
 import android.view.inputmethod.InputMethodManager
+import android.widget.Toast
 import androidx.lifecycle.lifecycleScope
+import com.example.wordsling.gboard.GboardKeeper
+import com.example.wordsling.gboard.WordslingAccessibilityService
 
 /**
  * Главный экран приложения.
@@ -41,10 +48,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var _logTextView: TextView
 
     // Выделение текстовой добавки
-    private lateinit var _textProcessor: TextProcessor
+    private lateinit var _serializer: Serializer
 
     // TCP-клиент для отправки дельт на ПК
     private lateinit var _tcpClient: TcpClient
+
+    // Кипер для управления gboard
+    private lateinit var _gboardKeeper: GboardKeeper
 
     // Хэндлер для отложенных задач (очистка поля)
     private val _handler = Handler(Looper.getMainLooper())
@@ -57,6 +67,12 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        /// Инициализировать общий модуль.
+        initializeGlob(this)
+
+        // Запросить у пользователя разрешение использования Accessibility Service.
+        _requestAccessibilityPermission()
+
         // Отключаем засыпание экрана во время работы приложения
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -64,10 +80,12 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         _inputEditText = binding.inputEditText
         _logTextView = binding.logTextView
-        _textProcessor = TextProcessor()
+        _serializer = Serializer()
         _tcpClient = TcpClient(this, lifecycleScope)  // Передаем родной scope приложения, он завершится
                                                 // в случае остановки и в корутинах случится исключение.
         _tcpClient.start()
+        _gboardKeeper = GboardKeeper(this)
+        _gboardKeeper.start()
 
         // Включаем программную прокрутку для журнала
         _logTextView.movementMethod = ScrollingMovementMethod.getInstance()
@@ -85,9 +103,16 @@ class MainActivity : AppCompatActivity() {
         // после разрисовки экрана.
         _inputEditText.post {
             _inputEditText.requestFocus()
-            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
             imm.showSoftInput(_inputEditText, 0)
+            channelToKeeper.trySend(KeeperSignal.GBOARD_STARTED)
         } // post
+
+        // Нужно запретить ручную набивку в поле ввода в середину текста, это поломает работу.
+        _inputEditText.setOnClickListener {
+            // При любом клике на поле ввода, перемещаем курсор в конец.
+            _inputEditText.setSelection(_inputEditText.text.length)
+        }
 
         // Установить слушателя изменений текста в поле ввода
         _inputEditText.addTextChangedListener(object : TextWatcher {
@@ -107,11 +132,12 @@ class MainActivity : AppCompatActivity() {
                 // Пустота не должна случаться, отсеиваем на всякий случай.
                 s ?: return
 
-                val delta = _textProcessor.takeText(s).delta
+                val delta = _serializer.takeText(s).delta
 
                 // Применяем дельту к журналу, если она есть
                 if (delta.isNotEmpty()) {
-                    _applyDelta(_logTextView, delta)
+//                    _applyDelta(_logTextView, delta)
+                    _logTextView.text = "${_logTextView.text}${delta}"
                     _tcpClient.send(delta)
                 }
 
@@ -126,8 +152,26 @@ class MainActivity : AppCompatActivity() {
         })
     } // onCreate()
 
+    override fun onResume() {
+        super.onResume()
+
+        // Автоматический вывод клавиатуры.
+        _inputEditText.postDelayed ({
+            _inputEditText.requestFocus()
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showSoftInput(_inputEditText, 0)
+            channelToKeeper.trySend(KeeperSignal.GBOARD_STARTED)
+        }, 300)
+
+        // После возврата из фона сокет может быть мёртв (NAT timeout, Doze).
+        // Принудительно переподключаемся.
+        _tcpClient.reconnect()
+    } // onResume()
+
     override fun onDestroy() {
         super.onDestroy()
+
+        _gboardKeeper.stop()
 
         // Легально закрыть TcpClient. Он и сам остановил бы свои корутины, когда умерла бы
         // lifecycleScope, но так приличнее.
@@ -159,7 +203,7 @@ class MainActivity : AppCompatActivity() {
 
         // Если текст находится в стадии композиции (gboard еще не зафиксировал слово),
         // очистку не производим. Она сработает в следующий период молчания.
-        if (_textProcessor.compositionFlag) return
+        if (_serializer.compositionFlag) return
 
         val currentText = _inputEditText.text.toString()
 
@@ -197,7 +241,7 @@ class MainActivity : AppCompatActivity() {
             _logTextView.text = ""
 
             // Сбрасываем процессор на новый опорный текст
-            _textProcessor.reset(_inputEditText.text.toString())
+            _serializer.reset(_inputEditText.text.toString())
 
             _isProgrammaticallyChangingText = false
         } // if
@@ -211,8 +255,8 @@ class MainActivity : AppCompatActivity() {
      *
      * Поддерживаемые форматы:
      * - `текст` — дописать текст в конец;
-     * - `[N]текст` — удалить `N` символов с конца, затем дописать текст;
-     * - `*[N]текст` — то же самое, но с маркером стабилизации `*`,
+     * - `\[N\]текст` — удалить `N` символов с конца, затем дописать текст;
+     * - `*\[N\]текст` — то же самое, но с маркером стабилизации `*`,
      *   который переносится в журнал как обычный символ.
      *
      * Если строка дельты пуста, метод ничего не делает.
@@ -270,4 +314,45 @@ class MainActivity : AppCompatActivity() {
             } // if
         } // if
     } // _applyDelta()
+
+
+    /// Запрашивает включение службы доступа.
+    private fun _requestAccessibilityPermission() {
+        if (!_isAccessibilityServiceEnabled(this,
+                WordslingAccessibilityService::class.java))
+        {
+
+            // Служба доступности не включена, запросить включение.
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            Toast.makeText(
+                this,
+                "Включите Voice Input Accessibility Service", Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    /// Проверяет подключенa ли служба доступа. Отрабатывает все подключенные службы, ищет по имени
+    /// службу доступа.
+    private fun _isAccessibilityServiceEnabled(context: Context, serviceClass: Class<out AccessibilityService>): Boolean {
+        val serviceId = "${context.packageName}/${serviceClass.canonicalName}"
+
+        // Получаем строку со всеми включенными службами
+        val enabledServicesSetting = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        )
+
+        if (enabledServicesSetting == null) return false
+
+        // Проверяем, есть ли ID нашей службы в этой строке
+        val splitter = TextUtils.SimpleStringSplitter(':')
+        splitter.setString(enabledServicesSetting)
+        while (splitter.hasNext()) {
+            if (splitter.next().equals(serviceId, ignoreCase = true)) {
+                return true
+            }
+        }
+
+        return false
+    }
 } // MainActivity

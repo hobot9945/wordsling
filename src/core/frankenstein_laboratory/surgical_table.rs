@@ -45,6 +45,11 @@ pub(super) struct Flag {
     pub(super) suppress_next_whitespace: bool,
     pub(super) capitalize_next_word: bool,
     pub(super) cancel_next_replacement: bool,
+
+    /// Разрешает отправку команд на экран. Опускается командой паузы.
+    pub(super) is_output_enabled: bool,
+    /// Флаг запроса безопасной очистки стола после завершения обработки текущей лексемы.
+    pub(super) pending_clear: bool,
 }
 
 impl Default for Flag {
@@ -53,6 +58,8 @@ impl Default for Flag {
             suppress_next_whitespace: true,     // пробел перед первым словом не нужен
             capitalize_next_word: true,         // по умолчанию первое слово с заглавной
             cancel_next_replacement: false,
+            is_output_enabled: true,            // по умолчанию текст идет на экран
+            pending_clear: false,
         }
     }
 }
@@ -66,6 +73,11 @@ impl Flag {
         self.suppress_next_whitespace = true;   // история очищена, значит разделение пробелом не нужно
         self.capitalize_next_word = false;
         self.cancel_next_replacement = false;
+
+        // ВАЖНО: is_output_enabled сохраняет свое состояние между очистками стола,
+        // иначе пауза будет сбрасываться сразу же после срабатывания команды паузы!
+        //
+        // pending_clear тоже не трогаем, так как им управляет внешний вызывающий код.
     }
 }   // impl Flag
 
@@ -268,6 +280,15 @@ impl SurgeTable {
             self._process_text_lexeme(&text_lexeme);
         } else {
             self._process_service_lexeme(lexeme);
+        }
+
+        // --- Безопасная очистка стола ---
+        // Если экшен (например, пауза или пробуждение) заказал очистку стола,
+        // выполняем её здесь, когда стек вызовов пуст и автомат находится
+        // в стабильном состоянии.
+        if self.flags.pending_clear {
+            self._clear_all();
+            self.flags.pending_clear = false;
         }
     }   // process_lexeme()
 
@@ -753,14 +774,14 @@ impl SurgeTable {
             let raw_tail_len = self._franken_board.len() - candidate._prong.fb_start;
             if raw_tail_len > 0 {
                 self._franken_board.truncate(candidate._prong.fb_start);
-                self._screen_transfer_vec.push(ScreenTransfer::Backspace(raw_tail_len));
+                self._push_screen_transfer(ScreenTransfer::Backspace(raw_tail_len));
             }
 
             // Заменить на сырой текст из разделочной доски.
             let original_raw_text: String = self._cutting_board[candidate._prong.cb_start..].iter().collect();
             if !original_raw_text.is_empty() {
                 self._franken_board.extend(original_raw_text.chars());
-                self._screen_transfer_vec.push(ScreenTransfer::Text(original_raw_text));
+                self._push_screen_transfer(ScreenTransfer::Text(original_raw_text));
             }
 
             // Выполнить дополнительные откатные действия после отката подстановки.
@@ -810,8 +831,7 @@ impl SurgeTable {
 
         let chars: Vec<char> = processed_text.chars().collect();
         self._franken_board.extend_from_slice(&chars);
-        self._screen_transfer_vec
-            .push(ScreenTransfer::Text(processed_text));
+        self._push_screen_transfer(ScreenTransfer::Text(processed_text));
         self._prune_if_needed();
     }   // _write_raw_text_to_franken_board()
 
@@ -829,15 +849,13 @@ impl SurgeTable {
         // Стереть хвост.
         if raw_tail_len > 0 {
             self._franken_board.truncate(fb_start);
-            self._screen_transfer_vec
-                .push(ScreenTransfer::Backspace(raw_tail_len));
+            self._push_screen_transfer(ScreenTransfer::Backspace(raw_tail_len));
         }
 
         // Дописать замену.
         if !replacement_text.is_empty() {
             self._franken_board.extend(replacement_text.chars());
-            self._screen_transfer_vec
-                .push(ScreenTransfer::Text(replacement_text.to_string()));
+            self._push_screen_transfer(ScreenTransfer::Text(replacement_text.to_string()));
         }
     }   // _replace_candidate_tail_in_franken_board()
 
@@ -1021,8 +1039,7 @@ impl SurgeTable {
                 let replacement_len = self._franken_board.len() - prong.fb_start;
                 if replacement_len > 0 {
                     self._franken_board.truncate(prong.fb_start);
-                    self._screen_transfer_vec
-                        .push(ScreenTransfer::Backspace(replacement_len));
+                    self._push_screen_transfer(ScreenTransfer::Backspace(replacement_len));
                 }
 
                 // 3. Списать заказанные забои с сырого текста зубца.
@@ -1048,7 +1065,7 @@ impl SurgeTable {
 
                     // String собираем исключительно для команды ScreenTransfer
                     let surviving_text: String = tail_slice.iter().collect();
-                    self._screen_transfer_vec.push(ScreenTransfer::Text(surviving_text));
+                    self._push_screen_transfer(ScreenTransfer::Text(surviving_text));
                 }
 
                 // 5. Дополнительный rollback после восстановления сырого хвоста.
@@ -1092,13 +1109,19 @@ impl SurgeTable {
                 self._franken_board
                     .truncate(self._franken_board.len() - erase_now);
 
-                self._screen_transfer_vec
-                    .push(ScreenTransfer::Backspace(erase_now));
+                self._push_screen_transfer(ScreenTransfer::Backspace(erase_now));
 
                 requested_erase -= erase_now;
             }
         }   // while
     }   // _apply_gboard_erase()
+
+    /// Отправляет команду на экран только в том случае, если вывод не заблокирован.
+    fn _push_screen_transfer(&mut self, transfer: ScreenTransfer) {
+        if self.flags.is_output_enabled {
+            self._screen_transfer_vec.push(transfer);
+        }
+    }   // _push_screen_transfer()
 
     /// Очищает разделочную доску при стабилизации потока.
     /// Весь текст уже отправлен на экран и отражен во franken_board.

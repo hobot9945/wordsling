@@ -70,7 +70,7 @@ impl Core {
         // Spawn pipeline stages in forward order.
         let tcp_server = TcpServer::new(text_tx);
         let lexer = Lexer::new(text_rx, lexeme_transfer_tx.clone());
-        let text_processor = FrankenLab::new(lexeme_transfer_rx, screen_transfer_tx);
+        let franken_lab = FrankenLab::new(lexeme_transfer_rx, screen_transfer_tx);
         let screen_writer = ScreenTyper::new(screen_transfer_rx);
 
         // Spawn independent tracker.
@@ -81,7 +81,7 @@ impl Core {
         Core {
             _tcp_server: tcp_server,
             _lexer: lexer,
-            _text_processor: text_processor,
+            _text_processor: franken_lab,
             _screen_writer: screen_writer,
             _user_activity_tracker: user_activity_tracker,
         }

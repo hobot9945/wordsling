@@ -129,6 +129,16 @@ impl SupplementaryActionMap {
             ),
         );
 
+        map.insert(
+            "disable_output".to_string(),
+            (disable_output as SupplementaryAction, None),
+        );
+
+        map.insert(
+            "enable_output".to_string(),
+            (enable_output as SupplementaryAction, None),
+        );
+
         SupplementaryActionMap {
             _map: map,
         }
@@ -315,3 +325,33 @@ pub(super) fn rollback_cancel_next_replacement(
         surge_table.flags.cancel_next_replacement = false;
     }
 }   // rollback_cancel_next_replacement()
+
+/// Отключает вывод на экран и заказывает очистку стола для синхронизации.
+///
+/// При переходе в режим паузы мы сбрасываем стол, чтобы накопленный мусор
+/// не вызывал рассинхрон с экраном при будущих забоях Gboard.
+pub(super) fn disable_output(
+    surge_table: &mut SurgeTable,
+    _prong: &mut Prong,
+    when_applied: WhenApplied,
+) {
+    if matches!(when_applied, WhenApplied::After) {
+        surge_table.flags.is_output_enabled = false;
+        surge_table.flags.pending_clear = true;
+    }
+}   // disable_output()
+
+/// Включает вывод на экран и заказывает очистку стола для старта с чистого листа.
+///
+/// Выход из паузы также очищает стол, чтобы сбросить любые внутренние состояния
+/// и начать диктовку строго синхронно с тем, что будет на экране.
+pub(super) fn enable_output(
+    surge_table: &mut SurgeTable,
+    _prong: &mut Prong,
+    when_applied: WhenApplied,
+) {
+    if matches!(when_applied, WhenApplied::After) {
+        surge_table.flags.is_output_enabled = true;
+        surge_table.flags.pending_clear = true;
+    }
+}   // enable_output()
